@@ -2,7 +2,6 @@ package mr
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -58,7 +57,6 @@ func (m *Master) getFileInd() int {
 func (m *Master) Register(args *RegisterArgs, reply *RegisterReply) error {
 	m.lock.Lock()
 	defer m.lock.Unlock()
-	fmt.Println("Work++")
 
 	ts := time.Now().UnixNano()
 
@@ -109,32 +107,33 @@ func (m *Master) Finish(args *FinishArgs, reply *FinishReply) error {
 			reduceID, _ := strconv.Atoi(splitted[len(splitted)-1])
 			m.reduceFileName[reduceID] = append(m.reduceFileName[reduceID], fileName)
 		}
+
+		if m.mapDoneNum == len(m.files) {
+			// all map jobs are finished
+			go func() {
+				for i := 0; i < m.nReduce; i++ {
+					m.fileIndChan <- (i + reduceBase)
+				}
+			}()
+
+			// clear map job map works
+			for k := range m.works {
+				delete(m.works, k)
+			}
+		}
 	} else if args.JobType == reduceJob {
 		m.reduceDoneNum++
+		if m.reduceDoneNum == m.nReduce {
+			// all reduce jobs are finished
+			close(m.fileIndChan)
+			m.wg.Done()
+		}
 	}
 
 	reply.Timestamp = time.Now().UnixNano()
 	w := m.works[args.ID]
 	w.done = true
 	m.works[args.ID] = w
-
-	if m.mapDoneNum == len(m.files) {
-		// all map jobs are finished
-		go func() {
-			for i := 0; i < m.nReduce; i++ {
-				m.fileIndChan <- (i + reduceBase)
-			}
-		}()
-
-		// clear map job map works
-		for k := range m.works {
-			delete(m.works, k)
-		}
-	} else if m.reduceDoneNum == m.nReduce {
-		// all reduce jobs are finished
-		close(m.fileIndChan)
-		m.wg.Done()
-	}
 
 	return nil
 }
@@ -172,6 +171,7 @@ func (m *Master) checkWorkStatus() {
 		expiredTime := t.Add(timeout)
 		if now.After(expiredTime) {
 			// failed, reassign job
+			log.Printf("ID: %v failed", id)
 			m.fileIndChan <- id
 		}
 	}

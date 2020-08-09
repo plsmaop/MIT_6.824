@@ -30,9 +30,8 @@ type KeyValue struct {
 
 // for write temp file
 type tempWriter struct {
-	enc      *json.Encoder
-	file     *os.File
-	fileName string
+	enc  *json.Encoder
+	file *os.File
 }
 
 //
@@ -71,16 +70,15 @@ func doMapJob(reply *RegisterReply, nReduce int, mapf func(string, string) []Key
 			continue
 		}
 
-		fileName := fmt.Sprintf("temp-%d-%d-%v", reply.ID, k, time.Now().UnixNano())
-		f, err := ioutil.TempFile("./", fileName)
+		fileNameTemplate := fmt.Sprintf("temp-%d-%d-*", reply.ID, k)
+		f, err := ioutil.TempFile("./", fileNameTemplate)
 		if err != nil {
 			log.Fatalf("cannot create temp file %v", fileName)
 		}
 		enc := json.NewEncoder(f)
 		writer := tempWriter{
-			enc:      enc,
-			file:     f,
-			fileName: fileName,
+			enc:  enc,
+			file: f,
 		}
 		fileWriters[k] = writer
 		writeTemp(&writer, &kv)
@@ -98,7 +96,10 @@ func doMapJob(reply *RegisterReply, nReduce int, mapf func(string, string) []Key
 			}
 		}
 
-		os.Rename(writer.fileName, outputFileName)
+		os.Rename(writer.file.Name(), outputFileName)
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
 		intermediateFileNames = append(intermediateFileNames, outputFileName)
 	}
 
@@ -111,7 +112,7 @@ func doMapJob(reply *RegisterReply, nReduce int, mapf func(string, string) []Key
 func writeTemp(w *tempWriter, kv *KeyValue) {
 	err := w.enc.Encode(kv)
 	if err != nil {
-		log.Fatal("write temp file err: %v", err)
+		log.Fatalf("write temp file err: %v", err)
 	}
 }
 
@@ -137,7 +138,7 @@ func doReduceJob(reply *RegisterReply, reducef func(string, []string) string) {
 	for _, fileName := range fileNames {
 		f, err := os.Open(fileName)
 		if err != nil {
-			log.Fatal("cannot open %v", fileName)
+			log.Fatalf("cannot open %v", fileName)
 		}
 
 		dec := json.NewDecoder(f)
@@ -150,14 +151,15 @@ func doReduceJob(reply *RegisterReply, reducef func(string, []string) string) {
 		}
 
 		f.Close()
+		os.Remove(fileName)
 	}
 
 	sort.Sort(ByKey(intermediate))
 
-	outputTempFileName := fmt.Sprintf("temp-%d-%v", reply.ID, time.Now().UnixNano())
-	f, err := ioutil.TempFile("./", outputTempFileName)
+	outputTempFileNameTemplate := fmt.Sprintf("temp-%d-*", reply.ID)
+	f, err := ioutil.TempFile("./", outputTempFileNameTemplate)
 	if err != nil {
-		log.Fatalf("cannot create temp file %v", outputTempFileName)
+		log.Fatalf("cannot create temp file %v", outputTempFileNameTemplate)
 	}
 
 	i := 0
@@ -187,7 +189,10 @@ func doReduceJob(reply *RegisterReply, reducef func(string, []string) string) {
 		}
 	}
 
-	os.Rename(outputTempFileName, outputFileName)
+	err = os.Rename(f.Name(), outputFileName)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
 	callFinish(reply.JobType, reply.ID, []string{})
 }
 
