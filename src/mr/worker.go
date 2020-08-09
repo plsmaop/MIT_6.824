@@ -1,10 +1,24 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
+import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io/ioutil"
+	"log"
+	"net/rpc"
+	"os"
+	"sort"
+	"time"
+)
 
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // Map functions return a slice of KeyValue.
@@ -12,6 +26,13 @@ import "hash/fnv"
 type KeyValue struct {
 	Key   string
 	Value string
+}
+
+// for write temp file
+type tempWriter struct {
+	enc      *json.Encoder
+	file     *os.File
+	fileName string
 }
 
 //
@@ -24,6 +45,151 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+//
+// doMapJob execute map function
+//
+func doMapJob(reply *RegisterReply, nReduce int, mapf func(string, string) []KeyValue) {
+	// do the map job
+	fileName := reply.FileNames[0]
+	file, err := os.Open(fileName)
+	if err != nil {
+		log.Fatalf("cannot open %v", fileName)
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", fileName)
+	}
+	file.Close()
+	kva := mapf(fileName, string(content))
+
+	fileWriters := map[int]tempWriter{}
+	// create tmp files
+	for _, kv := range kva {
+		k := ihash(kv.Key) % nReduce
+		if writer, ok := fileWriters[k]; ok {
+			writeTemp(&writer, &kv)
+			continue
+		}
+
+		fileName := fmt.Sprintf("temp-%d-%d-%v", reply.ID, k, time.Now().UnixNano())
+		f, err := ioutil.TempFile("./", fileName)
+		if err != nil {
+			log.Fatalf("cannot create temp file %v", fileName)
+		}
+		enc := json.NewEncoder(f)
+		writer := tempWriter{
+			enc:      enc,
+			file:     f,
+			fileName: fileName,
+		}
+		fileWriters[k] = writer
+		writeTemp(&writer, &kv)
+	}
+
+	// close and rename temfiles
+	intermediateFileNames := []string{}
+	for id, writer := range fileWriters {
+		writer.file.Close()
+		outputFileName := fmt.Sprintf("mr-%d-%d", reply.ID, id)
+		if _, err := os.Stat(outputFileName); err == nil {
+			e := os.Remove(outputFileName)
+			if e != nil {
+				log.Fatal(e)
+			}
+		}
+
+		os.Rename(writer.fileName, outputFileName)
+		intermediateFileNames = append(intermediateFileNames, outputFileName)
+	}
+
+	callFinish(reply.JobType, reply.ID, intermediateFileNames)
+}
+
+//
+// writeTemp writes the intermediate output from map function
+//
+func writeTemp(w *tempWriter, kv *KeyValue) {
+	err := w.enc.Encode(kv)
+	if err != nil {
+		log.Fatal("write temp file err: %v", err)
+	}
+}
+
+func callFinish(jobType jobType, id int, fileNames []string) {
+	args := FinishArgs{
+		Timestamp: time.Now().UnixNano(),
+		JobType:   jobType,
+		ID:        id,
+		FileNames: fileNames,
+	}
+
+	reply := FinishReply{}
+
+	call("Master.Finish", &args, &reply)
+}
+
+//
+// doReduceJob execute reduce function
+//
+func doReduceJob(reply *RegisterReply, reducef func(string, []string) string) {
+	fileNames := reply.FileNames
+	intermediate := []KeyValue{}
+	for _, fileName := range fileNames {
+		f, err := os.Open(fileName)
+		if err != nil {
+			log.Fatal("cannot open %v", fileName)
+		}
+
+		dec := json.NewDecoder(f)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+
+		f.Close()
+	}
+
+	sort.Sort(ByKey(intermediate))
+
+	outputTempFileName := fmt.Sprintf("temp-%d-%v", reply.ID, time.Now().UnixNano())
+	f, err := ioutil.TempFile("./", outputTempFileName)
+	if err != nil {
+		log.Fatalf("cannot create temp file %v", outputTempFileName)
+	}
+
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(f, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+
+	f.Close()
+	outputFileName := fmt.Sprintf("mr-out-%d", reply.ID)
+	if _, err := os.Stat(outputFileName); err == nil {
+		e := os.Remove(outputFileName)
+		if e != nil {
+			log.Fatal(e)
+		}
+	}
+
+	os.Rename(outputTempFileName, outputFileName)
+	callFinish(reply.JobType, reply.ID, []string{})
+}
 
 //
 // main/mrworker.go calls this function.
@@ -32,33 +198,25 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	for {
+		args := RegisterArgs{
+			Timestamp: time.Now().UnixNano(),
+		}
 
-	// uncomment to send the Example RPC to the master.
-	// CallExample()
+		reply := RegisterReply{}
+		if !call("Master.Register", &args, &reply) {
+			return
+		}
 
-}
-
-//
-// example function to show how to make an RPC call to the master.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func CallExample() {
-
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	call("Master.Example", &args, &reply)
-
-	// reply.Y should be 100.
-	fmt.Printf("reply.Y %v\n", reply.Y)
+		switch reply.JobType {
+		case mapJob:
+			doMapJob(&reply, reply.NReduce, mapf)
+		case reduceJob:
+			doReduceJob(&reply, reducef)
+		case jobDone:
+			return
+		}
+	}
 }
 
 //
