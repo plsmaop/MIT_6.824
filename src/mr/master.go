@@ -55,12 +55,13 @@ func (m *Master) getFileInd() int {
 // Register function for workers to register themself
 //
 func (m *Master) Register(args *RegisterArgs, reply *RegisterReply) error {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
 	ts := time.Now().UnixNano()
 
 	id := m.getFileInd()
+
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
 	if m.nReduce == m.reduceDoneNum {
 		reply.JobType = jobDone
 		return nil
