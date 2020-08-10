@@ -99,6 +99,11 @@ func (m *Master) Register(args *RegisterArgs, reply *RegisterReply) error {
 func (m *Master) Finish(args *FinishArgs, reply *FinishReply) error {
 	m.lock.Lock()
 	defer m.lock.Unlock()
+	if _, ok := m.works[args.ID]; !ok {
+		// worker is seen as failed
+		return nil
+	}
+
 	if args.JobType == mapJob {
 		m.mapDoneNum++
 
@@ -116,11 +121,6 @@ func (m *Master) Finish(args *FinishArgs, reply *FinishReply) error {
 					m.fileIndChan <- (i + reduceBase)
 				}
 			}()
-
-			// clear map job map works
-			for k := range m.works {
-				delete(m.works, k)
-			}
 		}
 	} else if args.JobType == reduceJob {
 		m.reduceDoneNum++
@@ -131,10 +131,7 @@ func (m *Master) Finish(args *FinishArgs, reply *FinishReply) error {
 		}
 	}
 
-	reply.Timestamp = time.Now().UnixNano()
-	w := m.works[args.ID]
-	w.done = true
-	m.works[args.ID] = w
+	delete(m.works, args.ID)
 
 	return nil
 }
@@ -155,10 +152,11 @@ func (m *Master) server() {
 	go http.Serve(l, nil)
 }
 
-func (m *Master) checkWorkStatus() {
+func (m *Master) checkWorkStatus() []int {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 	now := time.Now()
+	expiredWorks := []int{}
 	for id, work := range m.works {
 		if work.done {
 			continue
@@ -168,14 +166,20 @@ func (m *Master) checkWorkStatus() {
 			id += reduceBase
 		}
 
-		t := time.Unix(work.timestamp, 0)
+		t := time.Unix(0, work.timestamp)
 		expiredTime := t.Add(timeout)
 		if now.After(expiredTime) {
 			// failed, reassign job
-			log.Printf("ID: %v failed", id)
-			m.fileIndChan <- id
+			log.Printf("Work ID: %v failed", id)
+			expiredWorks = append(expiredWorks, id)
 		}
 	}
+
+	for _, workID := range expiredWorks {
+		delete(m.works, workID)
+	}
+
+	return expiredWorks
 }
 
 //
@@ -193,8 +197,11 @@ func (m *Master) Done() bool {
 			case <-ctx.Done():
 				return
 			default:
-				m.checkWorkStatus()
-				time.Sleep(time.Second)
+				expiredWorks := m.checkWorkStatus()
+				for _, work := range expiredWorks {
+					m.fileIndChan <- work
+				}
+				time.Sleep(5 * time.Second)
 			}
 		}
 	}(ctx)

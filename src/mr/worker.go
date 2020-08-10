@@ -151,7 +151,6 @@ func doReduceJob(reply *RegisterReply, reducef func(string, []string) string) {
 		}
 
 		f.Close()
-		os.Remove(fileName)
 	}
 
 	sort.Sort(ByKey(intermediate))
