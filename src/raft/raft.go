@@ -17,14 +17,15 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "sync/atomic"
-import "../labrpc"
+import (
+	"sync"
+	"sync/atomic"
+
+	"../labrpc"
+)
 
 // import "bytes"
 // import "../labgob"
-
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -44,6 +45,12 @@ type ApplyMsg struct {
 }
 
 //
+// Log structure for Raft
+//
+type log struct {
+}
+
+//
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
@@ -56,7 +63,17 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	currentTerm int
+	votedFor    int
+	logs        []log
 
+	// volatile state
+	commitIndex int
+	lastApplied int
+
+	// on leaders
+	nextIndex  []int
+	matchIndex []int
 }
 
 // return currentTerm and whether this server
@@ -85,7 +102,6 @@ func (rf *Raft) persist() {
 	// rf.persister.SaveRaftState(data)
 }
 
-
 //
 // restore previously persisted state.
 //
@@ -108,15 +124,16 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	term         int
+	candidateID  int
+	lastLogIndex int
+	lastLogTerm  int
 }
 
 //
@@ -125,6 +142,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	term        int
+	voteGranted bool
 }
 
 //
@@ -168,7 +187,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -189,7 +207,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -228,16 +245,23 @@ func (rf *Raft) killed() bool {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
-
+	rf := &Raft{
+		peers:       peers,
+		persister:   persister,
+		me:          me,
+		dead:        0,
+		currentTerm: 0,
+		votedFor:    -1,
+		logs:        []log{},
+		commitIndex: 0,
+		lastApplied: 0,
+		nextIndex:   make([]int, len(peers), 1),
+		matchIndex:  make([]int, len(peers)),
+	}
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 
 	return rf
 }
