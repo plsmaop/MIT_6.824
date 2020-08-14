@@ -51,6 +51,17 @@ type log struct {
 }
 
 //
+// State for Raft
+//
+type state int
+
+const (
+	follower state = iota
+	candidate
+	leader
+)
+
+//
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
@@ -66,12 +77,13 @@ type Raft struct {
 	currentTerm int
 	votedFor    int
 	logs        []log
+	state       state
 
 	// volatile state
 	commitIndex int
 	lastApplied int
 
-	// on leaders
+	// on leader
 	nextIndex  []int
 	matchIndex []int
 }
@@ -130,10 +142,10 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	term         int
-	candidateID  int
-	lastLogIndex int
-	lastLogTerm  int
+	Term         int
+	CandidateID  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -142,8 +154,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	term        int
-	voteGranted bool
+	Term        int
+	VoteGranted bool
 }
 
 //
@@ -151,6 +163,15 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.currentTerm > args.Term {
+		reply.VoteGranted = false
+		return
+	}
+
+	// if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && args.LastLogIndex >= rf.
 }
 
 //
@@ -257,6 +278,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		lastApplied: 0,
 		nextIndex:   make([]int, len(peers), 1),
 		matchIndex:  make([]int, len(peers)),
+		state:       follower,
 	}
 	// Your initialization code here (2A, 2B, 2C).
 
