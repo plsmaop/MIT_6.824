@@ -18,8 +18,11 @@ package raft
 //
 
 import (
+	"context"
+	"math/rand"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"../labrpc"
 )
@@ -48,6 +51,10 @@ type ApplyMsg struct {
 // Log structure for Raft
 //
 type log struct {
+	CommandIndex int
+	Term         int
+	Commited     bool
+	Command      interface{}
 }
 
 //
@@ -60,6 +67,8 @@ const (
 	candidate
 	leader
 )
+
+const electionTimeoutPeriodBase = int64(time.Microsecond * 100)
 
 //
 // A Go object implementing a single Raft peer.
@@ -86,16 +95,18 @@ type Raft struct {
 	// on leader
 	nextIndex  []int
 	matchIndex []int
+
+	// for election
+	receivedVote          int
+	electionTimeout       int64
+	electionTimeoutPeriod int64
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
 	// Your code here (2A).
-	return term, isleader
+	return rf.currentTerm, rf.state == leader
 }
 
 //
@@ -136,6 +147,19 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
+// must be used in critical section
+func (rf *Raft) updateTerm(term int) {
+	// update term
+	if term <= rf.currentTerm {
+		return
+	}
+
+	rf.currentTerm = term
+	rf.state = follower
+	rf.votedFor = -1
+	rf.receivedVote = 0
+}
+
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
@@ -159,19 +183,45 @@ type RequestVoteReply struct {
 }
 
 //
-// example RequestVote RPC handler.
+// check log up-to-date for received vote
+// must be used in critical section
+//
+func (rf *Raft) checkLogUpTodate(args *RequestVoteArgs) bool {
+	// start from 1
+	logLastIndex := len(rf.logs)
+	if len(rf.logs) == 0 {
+		return true
+	}
+
+	if args.LastLogTerm > rf.logs[logLastIndex-1].Term {
+		// last log with latest term
+		return true
+	} else if args.LastLogTerm == rf.logs[logLastIndex-1].Term {
+		// same last term but longer log
+		return args.LastLogIndex >= logLastIndex
+	}
+
+	return false
+}
+
+//
+// RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	rf.updateTerm(args.Term)
 
-	if rf.currentTerm > args.Term {
-		reply.VoteGranted = false
-		return
+	grant := (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && args.Term == rf.currentTerm && rf.checkLogUpTodate(args)
+	if grant {
+		// first one wins
+		rf.votedFor = args.CandidateID
+		rf.electionTimeout = time.Now().UnixNano() + int64(rf.electionTimeoutPeriod)
 	}
 
-	// if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && args.LastLogIndex >= rf.
+	reply.VoteGranted = grant
+	reply.Term = rf.currentTerm
 }
 
 //
@@ -206,6 +256,141 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
+}
+
+// must be used in critical section
+func (rf *Raft) becomeLeader() {
+	if rf.state != candidate {
+		return
+	}
+
+	rf.state = leader
+	for ind := range rf.nextIndex {
+		rf.nextIndex[ind] = len(rf.logs) + 1
+		rf.matchIndex[ind] = 0
+	}
+}
+
+func (rf *Raft) checkElection(ctx context.Context) {
+	// election
+	type electionArgs struct {
+		peerInd int
+		args    RequestVoteArgs
+	}
+
+	electionChan := make(chan electionArgs, len(rf.peers))
+	go func() {
+		for {
+			rf.mu.Lock()
+			now := time.Now()
+			if rf.state != leader && now.After(time.Unix(0, rf.electionTimeout)) {
+				// start new election
+				rf.receivedVote = 0
+				rf.votedFor = -1
+				rf.state = candidate
+				rf.currentTerm++
+				rf.electionTimeout = now.UnixNano() + rf.electionTimeoutPeriod
+				lastLogIndex := len(rf.logs)
+				lastLogTerm := 0
+				if len(rf.logs) > 0 {
+					lastLogTerm = rf.logs[lastLogIndex-1].Term
+				}
+
+				args := RequestVoteArgs{
+					Term:         rf.currentTerm,
+					CandidateID:  rf.me,
+					LastLogIndex: lastLogIndex,
+					LastLogTerm:  lastLogTerm,
+				}
+				for ind := range rf.peers {
+					electionChan <- electionArgs{
+						peerInd: ind,
+						args:    args,
+					}
+				}
+			}
+
+			rf.mu.Unlock()
+			time.Sleep(time.Millisecond * 100)
+		}
+	}()
+
+	for range rf.peers {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case electionArgs := <-electionChan:
+					rf.startElection(electionArgs.peerInd, electionArgs.args)
+				}
+			}
+		}()
+	}
+}
+
+func (rf *Raft) startElection(peerInd int, args RequestVoteArgs) {
+	reply := RequestVoteReply{}
+
+	rf.sendRequestVote(peerInd, &args, &reply)
+	rf.handleRequestVoteResponse(&reply)
+}
+
+func (rf *Raft) handleRequestVoteResponse(reply *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.updateTerm(reply.Term)
+
+	if rf.currentTerm > reply.Term {
+		// drop stale response
+		return
+	}
+
+	if rf.receivedVote > len(rf.peers)/2 || !reply.VoteGranted {
+		return
+	}
+
+	rf.receivedVote++
+	if !(rf.receivedVote > len(rf.peers)/2) {
+		return
+	}
+
+	// become leader
+	rf.becomeLeader()
+}
+
+type AppendEntriesArgs struct {
+	Term              int
+	LeaderID          int
+	PrevLogIndex      int
+	PrevLogTerm       int
+	Entries           []log
+	LeaderCommitIndex int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.updateTerm(args.Term)
+
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	rf.logs = append(rf.logs, args.Entries...)
+	reply.Term = args.Term
+
+	// reset timeout
+	rf.electionTimeout = time.Now().UnixNano() + rf.electionTimeoutPeriod
+	rf.state = follower
+
 }
 
 //
@@ -266,6 +451,8 @@ func (rf *Raft) killed() bool {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+
+	timeout := electionTimeoutPeriodBase + (rand.Int63()%1000)*int64(time.Millisecond)
 	rf := &Raft{
 		peers:       peers,
 		persister:   persister,
@@ -279,11 +466,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		nextIndex:   make([]int, len(peers), 1),
 		matchIndex:  make([]int, len(peers)),
 		state:       follower,
+
+		receivedVote:          0,
+		electionTimeout:       time.Now().UnixNano() + timeout,
+		electionTimeoutPeriod: timeout,
 	}
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rf.checkElection(ctx)
 
 	return rf
 }
