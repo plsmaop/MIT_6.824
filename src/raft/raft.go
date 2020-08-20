@@ -74,8 +74,14 @@ const (
 	randMin                   = 100
 )
 
+func (rf *Raft) newRandomNum() int64 {
+	randNum := (rand.Int63n(randMax-randMin) + randMin) * int64(time.Millisecond)
+	rf.electionTimeoutPeriod = randNum
+	return randNum
+}
+
 func (rf *Raft) newTimout() int64 {
-	return time.Now().UnixNano() + electionTimeoutPeriodBase + (rand.Int63n(randMax-randMin)+randMin)*int64(time.Millisecond)
+	return time.Now().UnixNano() + electionTimeoutPeriodBase + rf.newRandomNum()
 }
 
 //
@@ -754,7 +760,6 @@ func (rf *Raft) printf(format string, a ...interface{}) {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 
-	timeout := electionTimeoutPeriodBase + (rand.Int63n(randMax-randMin)+randMin)*int64(time.Millisecond)
 	rf := &Raft{
 		peers:       peers,
 		persister:   persister,
@@ -769,11 +774,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		matchIndex:  make([]int, len(peers)),
 		state:       follower,
 
-		receivedVote:    0,
-		electionTimeout: time.Now().UnixNano() + timeout,
-
-		appendChan: make(chan appendEntriesTaskArgs, len(peers)),
+		receivedVote: 0,
+		appendChan:   make(chan appendEntriesTaskArgs, len(peers)),
 	}
+
+	rf.electionTimeout = rf.newTimout()
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
