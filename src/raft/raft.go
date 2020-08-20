@@ -356,7 +356,7 @@ func (rf *Raft) getAppendEntriesTaskArgs(now time.Time) (bool, []appendEntriesTa
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if rf.state != leader || !now.After(time.Unix(0, rf.electionTimeout-((2*rf.electionTimeoutPeriod)/3))) {
+	if rf.state != leader || !now.After(time.Unix(0, rf.electionTimeout-((9*rf.electionTimeoutPeriod)/10))) {
 		return false, nil
 	}
 
@@ -440,7 +440,7 @@ func (rf *Raft) startLoop() {
 		}
 	}()
 
-	for range rf.peers {
+	for i := 0; i < len(rf.peers)*10; i++ {
 		go func() {
 			for {
 				select {
@@ -777,7 +777,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		receivedVote: 0,
 		appendChan:   make(chan appendEntriesTaskArgs, len(peers)),
 	}
-
 	rf.electionTimeout = rf.newTimout()
 	// Your initialization code here (2A, 2B, 2C).
 
