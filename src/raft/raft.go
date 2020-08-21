@@ -419,39 +419,48 @@ func (rf *Raft) getAppendEntriesTaskArgs(now time.Time) []appendEntriesTaskArgs 
 	return appendEntriesTaskArgsToSend
 }
 
-func (rf *Raft) advanceCommitIndex() []ApplyMsg {
+func (rf *Raft) getCommitedEntriesToApply() []ApplyMsg {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if rf.state != leader {
-		return nil
-	}
-
-	rf.matchIndex[rf.me] = len(rf.logs)
-	matchIndex := make([]int, len(rf.matchIndex))
-	copy(matchIndex, rf.matchIndex)
-	sort.Ints(matchIndex)
-
-	maxAgreeIndex := matchIndex[len(matchIndex)/2]
-	if maxAgreeIndex == 0 || rf.logs[maxAgreeIndex-1].Term != rf.currentTerm {
-		return nil
-	}
-
+	commitIndex := rf.commitIndex
 	entriesToCommit := []ApplyMsg{}
-	for i := rf.commitIndex; i < maxAgreeIndex; i++ {
-		if rf.logs[i].Commited {
+	if rf.state == leader {
+		// leader advance commit index
+		rf.nextIndex[rf.me] = len(rf.logs) + 1
+		rf.matchIndex[rf.me] = len(rf.logs)
+		matchIndex := make([]int, len(rf.matchIndex))
+		copy(matchIndex, rf.matchIndex)
+		sort.Ints(matchIndex)
+
+		commitIndex = matchIndex[len(matchIndex)/2]
+		if commitIndex == 0 || rf.logs[commitIndex-1].Term != rf.currentTerm {
+			// no advance
+			commitIndex = rf.commitIndex
+		} else {
+			// advance
+			rf.commitIndex = commitIndex
+		}
+	}
+
+	for i := rf.lastApplied; i < commitIndex; i++ {
+		if rf.logs[i].Command == nil {
+			// term enrty
 			continue
 		}
 
 		entriesToCommit = append(entriesToCommit, ApplyMsg{
 			Command:      rf.logs[i].Command,
 			CommandValid: true,
-			CommandIndex: i + 1,
+			// minus tern number
+			CommandIndex: i - rf.logs[i].Term + 1,
 		})
 		rf.logs[i].Commited = true
 	}
-	rf.commitIndex = maxAgreeIndex
-	// rf.printf("%d commit index: %d", rf.me, rf.commitIndex)
+
+	if len(entriesToCommit) > 0 {
+		rf.printf("%d entries: %v\nentries to commit: %v\n", rf.me, rf.logs, entriesToCommit)
+	}
 
 	return entriesToCommit
 }
@@ -467,14 +476,14 @@ func (rf *Raft) startLoop() {
 		time.Sleep(10 * time.Millisecond)
 	}()
 
-	// advance commit index
+	// apply commited index
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				entriesToCommit := rf.advanceCommitIndex()
+				entriesToCommit := rf.getCommitedEntriesToApply()
 				for _, applyMsg := range entriesToCommit {
 					rf.applyCh <- applyMsg
 					rf.printf("%d apply index: %d", rf.me, applyMsg.CommandIndex)
@@ -774,17 +783,19 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 
+	term := rf.currentTerm
+	// cmdInd = nextInd - term
+	cmdInd := len(rf.logs) + 1 - term
 	rf.logs = append(rf.logs, entry{
 		Term:         rf.currentTerm,
 		Commited:     false,
 		Command:      command,
-		CommandIndex: len(rf.logs) + 1,
+		CommandIndex: cmdInd,
 	})
 
-	index, term := len(rf.logs), rf.currentTerm
 	rf.mu.Unlock()
 
-	return index, term, true
+	return cmdInd, term, true
 }
 
 //
