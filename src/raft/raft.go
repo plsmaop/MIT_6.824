@@ -20,6 +20,7 @@ package raft
 import (
 	"context"
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -106,6 +107,7 @@ type Raft struct {
 	votedFor    int
 	logs        []entry
 	state       state
+	applyCh     chan ApplyMsg
 
 	// volatile state
 	commitIndex int
@@ -331,12 +333,12 @@ type electionArgs struct {
 }
 
 // helper function
-func (rf *Raft) getRequestVoteArgs(now time.Time) (bool, []electionArgs) {
+func (rf *Raft) getRequestVoteArgs(now time.Time) []electionArgs {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	if rf.state == leader || !now.After(time.Unix(0, rf.electionTimeout)) {
-		return false, nil
+		return nil
 	}
 
 	// reset timeout
@@ -370,15 +372,15 @@ func (rf *Raft) getRequestVoteArgs(now time.Time) (bool, []electionArgs) {
 		})
 	}
 
-	return true, requestVoteArgsToSend
+	return requestVoteArgsToSend
 }
 
-func (rf *Raft) getAppendEntriesTaskArgs(now time.Time) (bool, []appendEntriesTaskArgs) {
+func (rf *Raft) getAppendEntriesTaskArgs(now time.Time) []appendEntriesTaskArgs {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if rf.state != leader || !rf.isHeartbeatTimeout(now) {
-		return false, nil
+	if rf.state != leader {
+		return nil
 	}
 
 	//rf.printf("now: %v, leader period: %v, timeout: %v", now.UnixNano(), rf.electionTimeout-(2*rf.electionTimeoutPeriod)/3, rf.electionTimeout)
@@ -414,7 +416,44 @@ func (rf *Raft) getAppendEntriesTaskArgs(now time.Time) (bool, []appendEntriesTa
 		})
 	}
 
-	return true, appendEntriesTaskArgsToSend
+	return appendEntriesTaskArgsToSend
+}
+
+func (rf *Raft) advanceCommitIndex() []ApplyMsg {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.state != leader {
+		return nil
+	}
+
+	rf.matchIndex[rf.me] = len(rf.logs)
+	matchIndex := make([]int, len(rf.matchIndex))
+	copy(matchIndex, rf.matchIndex)
+	sort.Ints(matchIndex)
+
+	maxAgreeIndex := matchIndex[len(matchIndex)/2]
+	if maxAgreeIndex == 0 || rf.logs[maxAgreeIndex-1].Term != rf.currentTerm {
+		return nil
+	}
+
+	entriesToCommit := []ApplyMsg{}
+	for i := rf.commitIndex; i < maxAgreeIndex; i++ {
+		if rf.logs[i].Commited {
+			continue
+		}
+
+		entriesToCommit = append(entriesToCommit, ApplyMsg{
+			Command:      rf.logs[i].Command,
+			CommandValid: true,
+			CommandIndex: i + 1,
+		})
+		rf.logs[i].Commited = true
+	}
+	rf.commitIndex = maxAgreeIndex
+	// rf.printf("%d commit index: %d", rf.me, rf.commitIndex)
+
+	return entriesToCommit
 }
 
 func (rf *Raft) startLoop() {
@@ -428,6 +467,28 @@ func (rf *Raft) startLoop() {
 		time.Sleep(10 * time.Millisecond)
 	}()
 
+	// advance commit index
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				entriesToCommit := rf.advanceCommitIndex()
+				for _, applyMsg := range entriesToCommit {
+					rf.applyCh <- applyMsg
+					rf.printf("%d apply index: %d", rf.me, applyMsg.CommandIndex)
+				}
+
+				rf.mu.Lock()
+				rf.lastApplied = rf.commitIndex
+				rf.mu.Unlock()
+			}
+
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
 	electionChan := make(chan electionArgs, len(rf.peers))
 	go func() {
 		for {
@@ -436,18 +497,15 @@ func (rf *Raft) startLoop() {
 				return
 			default:
 				now := time.Now()
-				shouldElect, requestVoteArgsToSend := rf.getRequestVoteArgs(now)
-				shouldSendHeartbeat, appendEntriesTaskArgsToSend := rf.getAppendEntriesTaskArgs(now)
-				if shouldElect {
-					for _, requestVoteArgs := range requestVoteArgsToSend {
-						electionChan <- requestVoteArgs
-					}
+				requestVoteArgsToSend := rf.getRequestVoteArgs(now)
+				appendEntriesTaskArgsToSend := rf.getAppendEntriesTaskArgs(now)
+
+				for _, requestVoteArgs := range requestVoteArgsToSend {
+					electionChan <- requestVoteArgs
 				}
 
-				if shouldSendHeartbeat {
-					for _, appendEntriesTaskArgs := range appendEntriesTaskArgsToSend {
-						rf.appendChan <- appendEntriesTaskArgs
-					}
+				for _, appendEntriesTaskArgs := range appendEntriesTaskArgsToSend {
+					rf.appendChan <- appendEntriesTaskArgs
 				}
 
 				time.Sleep(time.Millisecond * period)
@@ -708,13 +766,25 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
 	// Your code here (2B).
+	rf.mu.Lock()
 
-	return index, term, isLeader
+	if rf.state != leader {
+		rf.mu.Unlock()
+		return -1, -1, false
+	}
+
+	rf.logs = append(rf.logs, entry{
+		Term:         rf.currentTerm,
+		Commited:     false,
+		Command:      command,
+		CommandIndex: len(rf.logs) + 1,
+	})
+
+	index, term := len(rf.logs), rf.currentTerm
+	rf.mu.Unlock()
+
+	return index, term, true
 }
 
 //
@@ -776,6 +846,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		persister:   persister,
 		me:          me,
 		dead:        0,
+		applyCh:     applyCh,
 		currentTerm: 0,
 		votedFor:    -1,
 		logs:        []entry{},
