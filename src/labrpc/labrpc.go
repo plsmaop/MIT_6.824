@@ -49,15 +49,19 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "../labgob"
-import "bytes"
-import "reflect"
-import "sync"
-import "log"
-import "strings"
-import "math/rand"
-import "time"
-import "sync/atomic"
+import (
+	"bytes"
+	"fmt"
+	"log"
+	"math/rand"
+	"reflect"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"../labgob"
+)
 
 type reqMsg struct {
 	endname  interface{} // name of sending ClientEnd
@@ -133,6 +137,8 @@ type Network struct {
 	done           chan struct{} // closed when Network is cleaned up
 	count          int32         // total RPC count, for statistics
 	bytes          int64         // total bytes send, for statistics
+	table          map[string]int
+	l              sync.RWMutex
 }
 
 func MakeNetwork() *Network {
@@ -144,6 +150,7 @@ func MakeNetwork() *Network {
 	rn.connections = map[interface{}](interface{}){}
 	rn.endCh = make(chan reqMsg)
 	rn.done = make(chan struct{})
+	rn.table = make(map[string]int)
 
 	// single goroutine to handle all ClientEnd.Call()s
 	go func() {
@@ -152,6 +159,9 @@ func MakeNetwork() *Network {
 			case xreq := <-rn.endCh:
 				atomic.AddInt32(&rn.count, 1)
 				atomic.AddInt64(&rn.bytes, int64(len(xreq.args)))
+				rn.l.Lock()
+				rn.table[xreq.svcMeth]++
+				rn.l.Unlock()
 				go rn.processReq(xreq)
 			case <-rn.done:
 				return
@@ -160,6 +170,14 @@ func MakeNetwork() *Network {
 	}()
 
 	return rn
+}
+
+func (rn *Network) PrintTable() {
+	rn.l.RLock()
+	defer rn.l.RUnlock()
+	for k, v := range rn.table {
+		fmt.Printf("%v: %v\n", k, v)
+	}
 }
 
 func (rn *Network) Cleanup() {

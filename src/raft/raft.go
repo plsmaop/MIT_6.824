@@ -507,9 +507,8 @@ func (rf *Raft) startLoop() {
 			case <-ctx.Done():
 				return
 			default:
-				now := time.Now()
-				requestVoteArgsToSend := rf.getRequestVoteArgs(now)
-				appendEntriesTaskArgsToSend := rf.getAppendEntriesTaskArgs(now)
+				requestVoteArgsToSend := rf.getRequestVoteArgs(time.Now())
+				appendEntriesTaskArgsToSend := rf.getAppendEntriesTaskArgs(time.Now())
 
 				for _, requestVoteArgs := range requestVoteArgsToSend {
 					electionChan <- requestVoteArgs
