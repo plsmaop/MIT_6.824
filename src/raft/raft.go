@@ -72,6 +72,7 @@ const (
 	electionTimeoutPeriodBase = int64(time.Millisecond * 500)
 	randMax                   = 500
 	randMin                   = 100
+	period                    = 80
 )
 
 func (rf *Raft) newRandomNum() int64 {
@@ -82,6 +83,10 @@ func (rf *Raft) newRandomNum() int64 {
 
 func (rf *Raft) newTimout() int64 {
 	return time.Now().UnixNano() + electionTimeoutPeriodBase + rf.newRandomNum()
+}
+
+func (rf *Raft) isHeartbeatTimeout(now time.Time) bool {
+	return now.After(time.Unix(0, rf.electionTimeout-((9*rf.electionTimeoutPeriod)/10)))
 }
 
 //
@@ -361,7 +366,7 @@ func (rf *Raft) getAppendEntriesTaskArgs(now time.Time) (bool, []appendEntriesTa
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if rf.state != leader || !now.After(time.Unix(0, rf.electionTimeout-((9*rf.electionTimeoutPeriod)/10))) {
+	if rf.state != leader || !rf.isHeartbeatTimeout(now) {
 		return false, nil
 	}
 
@@ -409,6 +414,7 @@ func (rf *Raft) startLoop() {
 		}
 
 		cancel()
+		time.Sleep(10 * time.Millisecond)
 	}()
 
 	electionChan := make(chan electionArgs, len(rf.peers))
@@ -440,7 +446,7 @@ func (rf *Raft) startLoop() {
 					}
 				}
 
-				time.Sleep(time.Millisecond * 80)
+				time.Sleep(time.Millisecond * period)
 			}
 		}
 	}()
@@ -456,6 +462,8 @@ func (rf *Raft) startLoop() {
 				case appendEntriesTaskArgs := <-rf.appendChan:
 					rf.startAppendEntries(appendEntriesTaskArgs.peerInd, appendEntriesTaskArgs.nextInd, appendEntriesTaskArgs.args)
 				}
+
+				time.Sleep(10 * time.Millisecond)
 			}
 		}()
 	}
