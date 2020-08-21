@@ -331,12 +331,12 @@ type electionArgs struct {
 }
 
 // helper function
-func (rf *Raft) getRequestVoteArgs(now time.Time) (bool, RequestVoteArgs) {
+func (rf *Raft) getRequestVoteArgs(now time.Time) (bool, []electionArgs) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	if rf.state == leader || !now.After(time.Unix(0, rf.electionTimeout)) {
-		return false, RequestVoteArgs{}
+		return false, nil
 	}
 
 	// reset timeout
@@ -354,12 +354,23 @@ func (rf *Raft) getRequestVoteArgs(now time.Time) (bool, RequestVoteArgs) {
 		lastLogTerm = rf.logs[lastLogIndex-1].Term
 	}
 
-	return true, RequestVoteArgs{
-		Term:         rf.currentTerm,
-		CandidateID:  rf.me,
-		LastLogIndex: lastLogIndex,
-		LastLogTerm:  lastLogTerm,
+	requestVoteArgsToSend := []electionArgs{}
+	for ind := range rf.peers {
+		if ind == rf.me {
+			continue
+		}
+		requestVoteArgsToSend = append(requestVoteArgsToSend, electionArgs{
+			peerInd: ind,
+			args: RequestVoteArgs{
+				Term:         rf.currentTerm,
+				CandidateID:  rf.me,
+				LastLogIndex: lastLogIndex,
+				LastLogTerm:  lastLogTerm,
+			},
+		})
 	}
+
+	return true, requestVoteArgsToSend
 }
 
 func (rf *Raft) getAppendEntriesTaskArgs(now time.Time) (bool, []appendEntriesTaskArgs) {
@@ -425,18 +436,11 @@ func (rf *Raft) startLoop() {
 				return
 			default:
 				now := time.Now()
-				shouldElect, requestVoteArgs := rf.getRequestVoteArgs(now)
+				shouldElect, requestVoteArgsToSend := rf.getRequestVoteArgs(now)
 				shouldSendHeartbeat, appendEntriesTaskArgsToSend := rf.getAppendEntriesTaskArgs(now)
 				if shouldElect {
-					for ind := range rf.peers {
-						if ind == rf.me {
-							continue
-						}
-
-						electionChan <- electionArgs{
-							peerInd: ind,
-							args:    requestVoteArgs,
-						}
+					for _, requestVoteArgs := range requestVoteArgsToSend {
+						electionChan <- requestVoteArgs
 					}
 				}
 
@@ -462,8 +466,6 @@ func (rf *Raft) startLoop() {
 				case appendEntriesTaskArgs := <-rf.appendChan:
 					rf.startAppendEntries(appendEntriesTaskArgs.peerInd, appendEntriesTaskArgs.nextInd, appendEntriesTaskArgs.args)
 				}
-
-				time.Sleep(10 * time.Millisecond)
 			}
 		}()
 	}
