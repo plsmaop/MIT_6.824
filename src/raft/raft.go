@@ -18,18 +18,18 @@ package raft
 //
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"math/rand"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"../labgob"
 	"../labrpc"
 )
-
-// import "bytes"
-// import "../labgob"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -138,6 +138,7 @@ func (rf *Raft) GetState() (int, bool) {
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
+// must be used in critical section
 //
 func (rf *Raft) persist() {
 	// Your code here (2C).
@@ -148,6 +149,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -170,6 +178,24 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var currentTerm, votedFor int
+	var logs []entry
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
+		log.Fatalf("%d restore failed", rf.me)
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.logs = logs
+		selfMatchIndex := len(rf.logs)
+		rf.matchIndex[rf.me] = selfMatchIndex
+		rf.nextIndex[rf.me] = selfMatchIndex + 1
+	}
 }
 
 // must be used in critical section
@@ -180,9 +206,8 @@ func (rf *Raft) updateTerm(term int) {
 	}
 
 	rf.printf("%d update term from %d to %d", rf.me, rf.currentTerm, term)
-	rf.currentTerm = term
 	rf.state = follower
-	rf.votedFor = -1
+	rf.updateVotedForAndCurrentTerm(-1, term)
 	rf.receivedVote = 0
 }
 
@@ -249,6 +274,31 @@ func (rf *Raft) appendLogs(logs ...entry) {
 	rf.logs = append(rf.logs, logs...)
 	rf.matchIndex[rf.me] = len(rf.logs)
 	rf.nextIndex[rf.me] = len(rf.logs) + 1
+	rf.persist()
+}
+
+// helper function
+// must be used in critical section
+func (rf *Raft) getPrevLogTerm(nextInd int) int {
+	prevLogTerm := 0
+	if nextInd > 1 {
+		prevLogTerm = rf.logs[nextInd-2].Term
+	}
+
+	return prevLogTerm
+}
+
+// helper function
+// must be used in critical section
+func (rf *Raft) updateVotedForAndCurrentTerm(newVotedFor, newTerm int) {
+	rf.votedFor = newVotedFor
+	rf.currentTerm = newTerm
+	rf.persist()
+}
+
+func (rf *Raft) printf(format string, a ...interface{}) {
+	a = append(a, time.Now())
+	DPrintf(format+" time: %v", a...)
 }
 
 //
@@ -264,7 +314,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	grant := (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && args.Term == rf.currentTerm && rf.checkLogUpTodate(args)
 	if grant {
 		// first one wins
-		rf.votedFor = args.CandidateID
+		rf.updateVotedForAndCurrentTerm(args.CandidateID, rf.currentTerm)
 		rf.electionTimeout = rf.newTimeout()
 		rf.printf("%d vote for %d in term %d", rf.me, rf.votedFor, rf.currentTerm)
 	} else {
@@ -353,10 +403,9 @@ func (rf *Raft) getRequestVoteArgs(now time.Time) []electionArgs {
 
 	// start new election
 	rf.receivedVote = 1
-	rf.votedFor = rf.me
 	rf.state = candidate
 	rf.printf("%d update term from %d to %d", rf.me, rf.currentTerm, rf.currentTerm+1)
-	rf.currentTerm++
+	rf.updateVotedForAndCurrentTerm(rf.me, rf.currentTerm+1)
 	lastLogIndex := len(rf.logs)
 	lastLogTerm := 0
 	if len(rf.logs) > 0 {
@@ -434,8 +483,6 @@ func (rf *Raft) getCommitedEntriesToApply() []ApplyMsg {
 	entriesToCommit := []ApplyMsg{}
 	if rf.state == leader {
 		// leader advance commit index
-		rf.nextIndex[rf.me] = len(rf.logs) + 1
-		rf.matchIndex[rf.me] = len(rf.logs)
 		matchIndex := make([]int, len(rf.matchIndex))
 		copy(matchIndex, rf.matchIndex)
 		sort.Ints(matchIndex)
@@ -451,6 +498,9 @@ func (rf *Raft) getCommitedEntriesToApply() []ApplyMsg {
 	}
 
 	for i := rf.lastApplied; i < commitIndex; i++ {
+		if i >= len(rf.logs) {
+			rf.printf("%v", rf)
+		}
 		entriesToCommit = append(entriesToCommit, ApplyMsg{
 			Command:      rf.logs[i].Command,
 			CommandValid: true,
@@ -678,27 +728,32 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = true
 		nextIndex := args.PrevLogIndex + 1
 		if len(args.Entries) == 0 || (len(rf.logs) >= nextIndex && rf.logs[nextIndex-1].Term == args.Entries[0].Term) {
-			// processed request
+			// processed request or heartbeat
 		} else if len(args.Entries) > 0 {
 			if len(rf.logs) >= nextIndex && rf.logs[nextIndex-1].Term != args.Entries[0].Term {
 				// conflict, drop conflicted logs
+				rf.printf("%d conflict, origin: %v, received: %v", rf.me, rf.logs, args)
 				rf.logs = rf.getLogsByRange(0, nextIndex-1)
 			}
 
 			if len(rf.logs) == args.PrevLogIndex {
 				// append
 				rf.appendLogs(args.Entries...)
+				rf.printf("%d append: %v from leader %d, lognow: %v", rf.me, args.Entries, args.LeaderID, rf.logs)
 			}
 		}
 	}
 
 	// update commit index
 	if args.LeaderCommitIndex > rf.commitIndex {
+		old := rf.commitIndex
 		if args.LeaderCommitIndex < len(rf.logs) {
 			rf.commitIndex = args.LeaderCommitIndex
 		} else {
 			rf.commitIndex = len(rf.logs)
 		}
+
+		rf.printf("%d update commit index from %d to %d(leader's: %d) by leader %d, matchIndex: %v", rf.me, old, rf.commitIndex, args.LeaderCommitIndex, args.LeaderID, rf.matchIndex[rf.me])
 	}
 }
 
@@ -822,22 +877,6 @@ func (rf *Raft) Kill() {
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
-}
-
-// helper function
-// must be used in critical section
-func (rf *Raft) getPrevLogTerm(nextInd int) int {
-	prevLogTerm := 0
-	if nextInd > 1 {
-		prevLogTerm = rf.logs[nextInd-2].Term
-	}
-
-	return prevLogTerm
-}
-
-func (rf *Raft) printf(format string, a ...interface{}) {
-	a = append(a, time.Now())
-	DPrintf(format+" time: %v", a...)
 }
 
 //
