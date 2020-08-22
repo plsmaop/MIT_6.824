@@ -755,41 +755,39 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term == rf.currentTerm && rf.state == follower && termMatch {
 		reply.Success = true
 		nextIndex := args.PrevLogIndex + 1
-		if len(args.Entries) == 0 {
-			// heartbeat
-		} else {
-			argsEntryIndex := 0
-			// find first agreement
-			for ; nextIndex <= len(rf.logs) && argsEntryIndex < len(args.Entries); nextIndex++ {
-				if rf.logs[nextIndex-1].Term != args.Entries[argsEntryIndex].Term {
-					break
-				}
-				argsEntryIndex++
+		argsEntryIndex := 0
+
+		// find first agreement
+		for ; nextIndex <= len(rf.logs) && argsEntryIndex < len(args.Entries); nextIndex++ {
+			if rf.logs[nextIndex-1].Term != args.Entries[argsEntryIndex].Term {
+				break
 			}
-
-			// not processed before
-			if argsEntryIndex <= len(args.Entries) {
-				entriesToAppend := args.Entries[argsEntryIndex:]
-				rf.logs = rf.getLogsByRange(0, nextIndex-1)
-				rf.appendLogs(entriesToAppend...)
-			}
-
-			/* if len(args.Entries) == 0 || (len(rf.logs) >= nextIndex && rf.logs[nextIndex-1].Term == args.Entries[0].Term) {
-				// processed request or heartbeat
-			} else if len(args.Entries) > 0 {
-				if len(rf.logs) >= nextIndex && rf.logs[nextIndex-1].Term != args.Entries[0].Term {
-					// conflict, drop conflicted logs
-					rf.printf("%d conflict, origin: %v, received: %v", rf.me, rf.logs, args)
-					rf.logs = rf.logs[:nextIndex-1]
-				}
-
-				if len(rf.logs) == args.PrevLogIndex {
-					// append
-					rf.appendLogs(args.Entries...)
-					rf.printf("%d append: %v from leader %d, lognow: %v", rf.me, args.Entries, args.LeaderID, rf.logs)
-				}
-			} */
+			argsEntryIndex++
 		}
+
+		// not processed before
+		if argsEntryIndex < len(args.Entries) {
+			entriesToAppend := args.Entries[argsEntryIndex:]
+			rf.logs = rf.getLogsByRange(0, nextIndex-1)
+			rf.appendLogs(entriesToAppend...)
+		}
+
+		/* if len(args.Entries) == 0 || (len(rf.logs) >= nextIndex && rf.logs[nextIndex-1].Term == args.Entries[0].Term) {
+			// processed request or heartbeat
+		} else if len(args.Entries) > 0 {
+			if len(rf.logs) >= nextIndex && rf.logs[nextIndex-1].Term != args.Entries[0].Term {
+				// conflict, drop conflicted logs
+				rf.printf("%d conflict, origin: %v, received: %v", rf.me, rf.logs, args)
+				rf.logs = rf.logs[:nextIndex-1]
+			}
+
+			if len(rf.logs) == args.PrevLogIndex {
+				// append
+				rf.appendLogs(args.Entries...)
+				rf.printf("%d append: %v from leader %d, lognow: %v", rf.me, args.Entries, args.LeaderID, rf.logs)
+			}
+		} */
+
 	}
 
 	// update commit index
