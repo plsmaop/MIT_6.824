@@ -790,6 +790,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	})
 
 	rf.mu.Unlock()
+	/* appendEntriesTaskArgsToSend := rf.getAppendEntriesTaskArgs(time.Now())
+
+	for _, appendEntriesTaskArgs := range appendEntriesTaskArgsToSend {
+		rf.appendChan <- appendEntriesTaskArgs
+	} */
 
 	return cmdInd, term, true
 }
