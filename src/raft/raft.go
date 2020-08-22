@@ -54,7 +54,6 @@ type ApplyMsg struct {
 type entry struct {
 	CommandIndex int
 	Term         int
-	Commited     bool
 	Command      interface{}
 }
 
@@ -73,7 +72,7 @@ const (
 	electionTimeoutPeriodBase = int64(time.Millisecond * 300)
 	randMax                   = 300
 	randMin                   = 100
-	period                    = 150
+	period                    = 100
 )
 
 func (rf *Raft) newRandomNum() int64 {
@@ -455,10 +454,8 @@ func (rf *Raft) getCommitedEntriesToApply() []ApplyMsg {
 		entriesToCommit = append(entriesToCommit, ApplyMsg{
 			Command:      rf.logs[i].Command,
 			CommandValid: true,
-			// minus tern number
-			CommandIndex: i + 1,
+			CommandIndex: rf.logs[i].CommandIndex,
 		})
-		rf.logs[i].Commited = true
 	}
 
 	if len(entriesToCommit) > 0 {
@@ -788,7 +785,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	cmdInd := rf.nextIndex[rf.me]
 	rf.appendLogs(entry{
 		Term:         rf.currentTerm,
-		Commited:     false,
 		Command:      command,
 		CommandIndex: cmdInd,
 	})
