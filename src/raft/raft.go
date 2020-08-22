@@ -668,8 +668,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term                 int
+	FailTerm             int
+	FirstIndexOfFailTerm int
+	Success              bool
 }
 
 func (rf *Raft) startAppendEntries(peerInd, nextInd int, args AppendEntriesArgs) {
@@ -717,9 +719,35 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.state = follower
 	}
 
+	// log inconsistency
 	if args.Term == rf.currentTerm && rf.state == follower && !termMatch {
 		reply.Success = false
-		rf.printf("%d fuck %v", rf.me, args)
+		rf.printf("%v fuck %v", rf, args)
+		// for log compaction
+		// return term of the conflicting entry and the first index of that term
+
+		conflictIndex := args.PrevLogIndex
+		if conflictIndex > len(rf.logs) {
+			conflictIndex = len(rf.logs)
+		}
+
+		failTerm := 0
+		firstIndexOfFailTerm := 0
+		if conflictIndex > 0 {
+			failTerm = rf.logs[conflictIndex-1].Term
+			firstIndexOfFailTerm = 1
+			for i := conflictIndex; i > 0; i-- {
+				if rf.logs[i-1].Term != failTerm {
+					// first index = i + 1
+					firstIndexOfFailTerm = i + 1
+					break
+				}
+			}
+		}
+
+		reply.FailTerm = failTerm
+		reply.FirstIndexOfFailTerm = firstIndexOfFailTerm
+
 		return
 	}
 
@@ -727,20 +755,40 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term == rf.currentTerm && rf.state == follower && termMatch {
 		reply.Success = true
 		nextIndex := args.PrevLogIndex + 1
-		if len(args.Entries) == 0 || (len(rf.logs) >= nextIndex && rf.logs[nextIndex-1].Term == args.Entries[0].Term) {
-			// processed request or heartbeat
-		} else if len(args.Entries) > 0 {
-			if len(rf.logs) >= nextIndex && rf.logs[nextIndex-1].Term != args.Entries[0].Term {
-				// conflict, drop conflicted logs
-				rf.printf("%d conflict, origin: %v, received: %v", rf.me, rf.logs, args)
-				rf.logs = rf.getLogsByRange(0, nextIndex-1)
+		if len(args.Entries) == 0 {
+			// heartbeat
+		} else {
+			argsEntryIndex := 0
+			// find first agreement
+			for ; nextIndex <= len(rf.logs) && argsEntryIndex < len(args.Entries); nextIndex++ {
+				if rf.logs[nextIndex-1].Term != args.Entries[argsEntryIndex].Term {
+					break
+				}
+				argsEntryIndex++
 			}
 
-			if len(rf.logs) == args.PrevLogIndex {
-				// append
-				rf.appendLogs(args.Entries...)
-				rf.printf("%d append: %v from leader %d, lognow: %v", rf.me, args.Entries, args.LeaderID, rf.logs)
+			// not processed before
+			if argsEntryIndex <= len(args.Entries) {
+				entriesToAppend := args.Entries[argsEntryIndex:]
+				rf.logs = rf.getLogsByRange(0, nextIndex-1)
+				rf.appendLogs(entriesToAppend...)
 			}
+
+			/* if len(args.Entries) == 0 || (len(rf.logs) >= nextIndex && rf.logs[nextIndex-1].Term == args.Entries[0].Term) {
+				// processed request or heartbeat
+			} else if len(args.Entries) > 0 {
+				if len(rf.logs) >= nextIndex && rf.logs[nextIndex-1].Term != args.Entries[0].Term {
+					// conflict, drop conflicted logs
+					rf.printf("%d conflict, origin: %v, received: %v", rf.me, rf.logs, args)
+					rf.logs = rf.logs[:nextIndex-1]
+				}
+
+				if len(rf.logs) == args.PrevLogIndex {
+					// append
+					rf.appendLogs(args.Entries...)
+					rf.printf("%d append: %v from leader %d, lognow: %v", rf.me, args.Entries, args.LeaderID, rf.logs)
+				}
+			} */
 		}
 	}
 
@@ -783,7 +831,8 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 		}
 
 	} else {
-		nextIndex := rf.nextIndex[peerInd] - 1
+		// handle log compaction
+		nextIndex := reply.FirstIndexOfFailTerm
 		if nextIndex < 1 {
 			rf.nextIndex[peerInd] = 1
 		} else {
