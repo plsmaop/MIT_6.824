@@ -509,6 +509,5 @@ func (cfg *config) end() {
 
 		fmt.Printf("  ... Passed --")
 		fmt.Printf("  %4.1f  %d %4d %7d %4d\n", t, npeers, nrpc, nbytes, ncmds)
-		cfg.net.PrintTable()
 	}
 }

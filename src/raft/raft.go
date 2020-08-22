@@ -73,7 +73,7 @@ const (
 	electionTimeoutPeriodBase = int64(time.Millisecond * 300)
 	randMax                   = 300
 	randMin                   = 100
-	period                    = 100
+	period                    = 150
 )
 
 func (rf *Raft) newRandomNum() int64 {
