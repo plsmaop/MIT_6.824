@@ -483,13 +483,15 @@ func (rf *Raft) startLoop() {
 				return
 			default:
 				entriesToCommit := rf.getCommitedEntriesToApply()
+				lastApplied := rf.lastApplied
 				for _, applyMsg := range entriesToCommit {
 					rf.applyCh <- applyMsg
 					rf.printf("%d apply index: %d", rf.me, applyMsg.CommandIndex)
+					lastApplied = applyMsg.CommandIndex
 				}
 
 				rf.mu.Lock()
-				rf.lastApplied = rf.commitIndex
+				rf.lastApplied = lastApplied
 				rf.mu.Unlock()
 			}
 
@@ -776,7 +778,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
 
-	if rf.state != leader {
+	if rf.state != leader || rf.killed() {
 		rf.mu.Unlock()
 		return -1, -1, false
 	}
@@ -830,9 +832,6 @@ func (rf *Raft) getPrevLogTerm(nextInd int) int {
 
 	return prevLogTerm
 }
-
-var l = sync.Mutex{}
-var o = ""
 
 func (rf *Raft) printf(format string, a ...interface{}) {
 	a = append(a, time.Now())
