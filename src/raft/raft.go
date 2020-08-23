@@ -298,13 +298,7 @@ func (rf *Raft) becomeLeader() {
 		rf.matchIndex[peerInd] = 0
 	}
 
-	// new term enrty
-	rf.logs = append(rf.logs, entry{
-		CommandIndex: len(rf.logs) + 1,
-		Term:         rf.currentTerm,
-		Commited:     false,
-		Command:      nil,
-	})
+	rf.matchIndex[rf.me] = len(rf.logs)
 
 	rf.printf("%d become leader", rf.me)
 }
@@ -400,7 +394,7 @@ func (rf *Raft) startLoop() {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		for !rf.killed() {
-
+			time.Sleep(100 * time.Millisecond)
 		}
 
 		cancel()
@@ -468,14 +462,14 @@ func (rf *Raft) startElection(peerInd int, args RequestVoteArgs) {
 	if !rf.sendRequestVote(peerInd, &args, &reply) {
 		return
 	}
-	rf.handleRequestVoteResponse(peerInd, &reply)
+	rf.handleRequestVoteResponse(peerInd, &args, &reply)
 }
 
-func (rf *Raft) handleRequestVoteResponse(peerInd int, reply *RequestVoteReply) {
+func (rf *Raft) handleRequestVoteResponse(peerInd int, args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	rf.updateTerm(reply.Term)
 
-	if rf.currentTerm > reply.Term || rf.state == follower {
+	if rf.currentTerm > reply.Term || rf.state == follower || args.Term != reply.Term {
 		// drop stale response
 		rf.printf("%d Drop response from %d in term %d", rf.me, peerInd, reply.Term)
 		rf.mu.Unlock()
@@ -580,16 +574,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// reset timeout
 	rf.electionTimeout = rf.newTimout()
+	// return to follower
+	if args.Term == rf.currentTerm && rf.state == candidate {
+		rf.state = follower
+	}
 
 	if args.Term == rf.currentTerm && rf.state == follower && !termMatch {
 		reply.Success = false
 		rf.printf("%d fuck %v", rf.me, args)
 		return
-	}
-
-	// return to follower
-	if args.Term == rf.currentTerm && rf.state == candidate {
-		rf.state = follower
 	}
 
 	// accept
@@ -598,7 +591,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		nextIndex := args.PrevLogIndex + 1
 		if len(args.Entries) == 0 || (len(rf.logs) >= nextIndex && rf.logs[nextIndex-1].Term == args.Entries[0].Term) {
 			// processed request
-			rf.commitIndex = args.LeaderCommitIndex
 		} else if len(args.Entries) > 0 {
 			if len(rf.logs) >= nextIndex && rf.logs[nextIndex-1].Term != args.Entries[0].Term {
 				// conflict, drop conflicted logs
@@ -631,7 +623,7 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 	rf.mu.Lock()
 	rf.updateTerm(reply.Term)
 
-	if rf.currentTerm > reply.Term || rf.state != leader {
+	if rf.currentTerm > reply.Term || rf.state != leader || args.Term != reply.Term {
 		// drop stale response
 		rf.mu.Unlock()
 		return
@@ -642,8 +634,11 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 	appendEntriesTaskArgsToSend := appendEntriesTaskArgs{}
 	if reply.Success {
 		matchIndex := args.PrevLogIndex + len(args.Entries)
-		rf.nextIndex[peerInd] = matchIndex + 1
-		rf.matchIndex[peerInd] = matchIndex
+		if matchIndex > rf.matchIndex[peerInd] {
+			rf.nextIndex[peerInd] = matchIndex + 1
+			rf.matchIndex[peerInd] = matchIndex
+		}
+
 	} else {
 		nextIndex := rf.nextIndex[peerInd] - 1
 		if nextIndex < 1 {
