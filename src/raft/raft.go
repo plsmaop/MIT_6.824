@@ -824,12 +824,12 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 	nextInd := 0
 	appendEntriesTaskArgsToSend := appendEntriesTaskArgs{}
 	if reply.Success {
-		matchIndex := args.PrevLogIndex + len(args.Entries)
-		if matchIndex > rf.matchIndex[peerInd] {
-			rf.nextIndex[peerInd] = matchIndex + 1
-			rf.matchIndex[peerInd] = matchIndex
+		newMatchIndex := args.PrevLogIndex + len(args.Entries)
+		if newMatchIndex > rf.matchIndex[peerInd] {
+			// ignore stale response
+			rf.nextIndex[peerInd] = newMatchIndex + 1
+			rf.matchIndex[peerInd] = newMatchIndex
 		}
-
 	} else {
 		// handle log compaction
 		nextIndex := reply.FirstIndexOfFailTerm
