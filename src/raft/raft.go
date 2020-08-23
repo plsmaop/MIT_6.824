@@ -759,7 +759,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// find first agreement
 		for ; nextIndex <= len(rf.logs) && argsEntryIndex < len(args.Entries); nextIndex++ {
-			if rf.logs[nextIndex-1].Term != args.Entries[argsEntryIndex].Term {
+			if rf.logs[nextIndex-1].Term != args.Entries[argsEntryIndex].Term || rf.logs[nextIndex-1].Command != args.Entries[argsEntryIndex].Command {
 				break
 			}
 			argsEntryIndex++
@@ -767,9 +767,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// not processed before
 		if argsEntryIndex < len(args.Entries) {
+			rf.printf("%d merge from: %v with %v", rf.me, rf, args)
 			entriesToAppend := args.Entries[argsEntryIndex:]
 			rf.logs = rf.getLogsByRange(0, nextIndex-1)
 			rf.appendLogs(entriesToAppend...)
+			rf.printf("%d done, merge from: %v with %v", rf.me, rf, entriesToAppend)
 		}
 
 		/* if len(args.Entries) == 0 || (len(rf.logs) >= nextIndex && rf.logs[nextIndex-1].Term == args.Entries[0].Term) {
