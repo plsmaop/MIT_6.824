@@ -70,10 +70,10 @@ const (
 )
 
 const (
-	electionTimeoutPeriodBase = int64(time.Millisecond * 500)
-	randMax                   = 500
+	electionTimeoutPeriodBase = int64(time.Millisecond * 300)
+	randMax                   = 300
 	randMin                   = 100
-	period                    = 80
+	period                    = 100
 )
 
 func (rf *Raft) newRandomNum() int64 {
@@ -82,7 +82,7 @@ func (rf *Raft) newRandomNum() int64 {
 	return randNum
 }
 
-func (rf *Raft) newTimout() int64 {
+func (rf *Raft) newTimeout() int64 {
 	return time.Now().UnixNano() + electionTimeoutPeriodBase + rf.newRandomNum()
 }
 
@@ -243,6 +243,16 @@ func (rf *Raft) checkLogUpTodate(args *RequestVoteArgs) bool {
 }
 
 //
+// helper function
+// must be used in critical section
+//
+func (rf *Raft) appendLogs(logs ...entry) {
+	rf.logs = append(rf.logs, logs...)
+	rf.matchIndex[rf.me] = len(rf.logs)
+	rf.nextIndex[rf.me] = len(rf.logs) + 1
+}
+
+//
 // RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -256,7 +266,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if grant {
 		// first one wins
 		rf.votedFor = args.CandidateID
-		rf.electionTimeout = rf.newTimout()
+		rf.electionTimeout = rf.newTimeout()
 		rf.printf("%d vote for %d in term %d", rf.me, rf.votedFor, rf.currentTerm)
 	} else {
 		rf.printf("%d reject vote for %d in term %d", rf.me, args.CandidateID, rf.currentTerm)
@@ -307,11 +317,9 @@ func (rf *Raft) becomeLeader() {
 		return
 	}
 
-	rf.receivedVote = 0
-	rf.votedFor = -1
 	rf.state = leader
+	nextInd := len(rf.logs) + 1
 	for peerInd := range rf.nextIndex {
-		nextInd := len(rf.logs) + 1
 		rf.nextIndex[peerInd] = nextInd
 		rf.matchIndex[peerInd] = 0
 	}
@@ -342,7 +350,7 @@ func (rf *Raft) getRequestVoteArgs(now time.Time) []electionArgs {
 	}
 
 	// reset timeout
-	rf.electionTimeout = rf.newTimout()
+	rf.electionTimeout = rf.newTimeout()
 
 	// start new election
 	rf.receivedVote = 1
@@ -387,7 +395,7 @@ func (rf *Raft) getAppendEntriesTaskArgs(now time.Time) []appendEntriesTaskArgs 
 
 	// reset timeout
 	if now.After(time.Unix(0, rf.electionTimeout)) {
-		rf.electionTimeout = rf.newTimout()
+		rf.electionTimeout = rf.newTimeout()
 	}
 
 	appendEntriesTaskArgsToSend := []appendEntriesTaskArgs{}
@@ -444,16 +452,11 @@ func (rf *Raft) getCommitedEntriesToApply() []ApplyMsg {
 	}
 
 	for i := rf.lastApplied; i < commitIndex; i++ {
-		if rf.logs[i].Command == nil {
-			// term enrty
-			continue
-		}
-
 		entriesToCommit = append(entriesToCommit, ApplyMsg{
 			Command:      rf.logs[i].Command,
 			CommandValid: true,
 			// minus tern number
-			CommandIndex: i - rf.logs[i].Term + 1,
+			CommandIndex: i + 1,
 		})
 		rf.logs[i].Commited = true
 	}
@@ -473,7 +476,6 @@ func (rf *Raft) startLoop() {
 		}
 
 		cancel()
-		time.Sleep(10 * time.Millisecond)
 	}()
 
 	// apply commited index
@@ -661,7 +663,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// reset timeout
-	rf.electionTimeout = rf.newTimout()
+	rf.electionTimeout = rf.newTimeout()
 	// return to follower
 	if args.Term == rf.currentTerm && rf.state == candidate {
 		rf.state = follower
@@ -687,7 +689,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 			if len(rf.logs) == args.PrevLogIndex {
 				// append
-				rf.logs = append(rf.logs, args.Entries...)
+				rf.appendLogs(args.Entries...)
 			}
 		}
 	}
@@ -784,9 +786,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	term := rf.currentTerm
-	// cmdInd = nextInd - term
-	cmdInd := len(rf.logs) + 1 - term
-	rf.logs = append(rf.logs, entry{
+	cmdInd := rf.nextIndex[rf.me]
+	rf.appendLogs(entry{
 		Term:         rf.currentTerm,
 		Commited:     false,
 		Command:      command,
@@ -870,7 +871,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		receivedVote: 0,
 		appendChan:   make(chan appendEntriesTaskArgs, len(peers)),
 	}
-	rf.electionTimeout = rf.newTimout()
+	rf.electionTimeout = rf.newTimeout()
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
