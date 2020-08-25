@@ -1,13 +1,16 @@
 package kvraft
 
-import "../labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
 
+	"../labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	currentLeader int
 }
 
 func nrand() int64 {
@@ -18,8 +21,10 @@ func nrand() int64 {
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
-	ck := new(Clerk)
-	ck.servers = servers
+	ck := &Clerk{
+		servers:       servers,
+		currentLeader: int(nrand()) % len(servers),
+	}
 	// You'll have to add code here.
 	return ck
 }
