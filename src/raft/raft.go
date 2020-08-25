@@ -48,10 +48,19 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
+type entryType int
+
+const (
+	stateMachineCmd entryType = iota
+	term
+	snapshot
+)
+
 //
 // Log structure for Raft
 //
 type entry struct {
+	Type         entryType
 	CommandIndex int
 	Term         int
 	Command      interface{}
@@ -154,13 +163,21 @@ func (rf *Raft) becomeLeader() {
 	}
 
 	rf.state = leader
+	/* rf.appendLogs(entry{
+		CommandIndex: len(rf.logs),
+		// to ensure previous logs are commited
+		Command: nil,
+		Term:    rf.currentTerm,
+		Type:    term,
+	}) */
+
 	nextInd := len(rf.logs) + 1
 	for peerInd := range rf.nextIndex {
 		rf.nextIndex[peerInd] = nextInd
 		rf.matchIndex[peerInd] = 0
 	}
 
-	rf.matchIndex[rf.me] = len(rf.logs)
+	rf.matchIndex[rf.me] = nextInd - 1
 
 	rf.printf("%d become leader", rf.me)
 }
@@ -774,8 +791,8 @@ func (rf *Raft) getCommitedEntriesToApply() []ApplyMsg {
 	}
 
 	for i := rf.lastApplied; i < commitIndex; i++ {
-		if i >= len(rf.logs) {
-			rf.printf("%v", rf)
+		if rf.logs[i].Type != stateMachineCmd {
+			continue
 		}
 		entriesToApply = append(entriesToApply, ApplyMsg{
 			Command:      rf.logs[i].Command,
@@ -893,6 +910,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term:         rf.currentTerm,
 		Command:      command,
 		CommandIndex: cmdInd,
+		Type:         stateMachineCmd,
 	})
 
 	return cmdInd, term, true
