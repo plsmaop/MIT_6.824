@@ -51,9 +51,9 @@ type ApplyMsg struct {
 type entryType int
 
 const (
-	stateMachineCmd entryType = iota
-	term
-	snapshot
+	stateMachineCmdEntry entryType = iota
+	termEntry
+	snapshotEntry
 )
 
 //
@@ -163,21 +163,19 @@ func (rf *Raft) becomeLeader() {
 	}
 
 	rf.state = leader
-	/* rf.appendLogs(entry{
-		CommandIndex: len(rf.logs),
-		// to ensure previous logs are commited
-		Command: nil,
-		Term:    rf.currentTerm,
-		Type:    term,
-	}) */
-
 	nextInd := len(rf.logs) + 1
 	for peerInd := range rf.nextIndex {
 		rf.nextIndex[peerInd] = nextInd
 		rf.matchIndex[peerInd] = 0
 	}
 
-	rf.matchIndex[rf.me] = nextInd - 1
+	// term entry, to ensure previous logs are commited
+	rf.appendLogs(entry{
+		CommandIndex: -1,
+		Command:      nil,
+		Term:         rf.currentTerm,
+		Type:         termEntry,
+	})
 
 	rf.printf("%d become leader", rf.me)
 }
@@ -196,6 +194,22 @@ func (rf *Raft) updateTerm(term int) {
 	rf.state = follower
 	rf.updateVotedForAndCurrentTerm(-1, term)
 	rf.receivedVote = 0
+}
+
+//
+// helper function
+// must be used in critical section
+//
+func (rf *Raft) getNextCmdIndex() int {
+	lastCmdInd := 0
+	for i := len(rf.logs) - 1; i >= 0; i-- {
+		if rf.logs[i].Type == stateMachineCmdEntry {
+			lastCmdInd = rf.logs[i].CommandIndex
+			break
+		}
+	}
+
+	return lastCmdInd + 1
 }
 
 //
@@ -791,7 +805,7 @@ func (rf *Raft) getCommitedEntriesToApply() []ApplyMsg {
 	}
 
 	for i := rf.lastApplied; i < commitIndex; i++ {
-		if rf.logs[i].Type != stateMachineCmd {
+		if rf.logs[i].Type != stateMachineCmdEntry {
 			continue
 		}
 		entriesToApply = append(entriesToApply, ApplyMsg{
@@ -905,12 +919,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	term := rf.currentTerm
-	cmdInd := rf.nextIndex[rf.me]
+	cmdInd := rf.getNextCmdIndex()
 	rf.appendLogs(entry{
 		Term:         rf.currentTerm,
 		Command:      command,
 		CommandIndex: cmdInd,
-		Type:         stateMachineCmd,
+		Type:         stateMachineCmdEntry,
 	})
 
 	return cmdInd, term, true
