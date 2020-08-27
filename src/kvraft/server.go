@@ -21,6 +21,42 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+const (
+	raftTimeout = time.Minute
+)
+
+type KVStore struct {
+	mu      sync.RWMutex
+	kvTable map[string]interface{}
+}
+
+func (kvs *KVStore) Get(k string) (interface{}, bool) {
+	kvs.mu.RLock()
+	defer kvs.mu.RUnlock()
+
+	v, ok := kvs.kvTable[k]
+	return v, ok
+}
+
+func (kvs *KVStore) Put(k string, v interface{}) {
+	kvs.mu.Lock()
+	defer kvs.mu.Unlock()
+
+	kvs.kvTable[k] = v
+}
+
+func (kvs *KVStore) Delete(k string) bool {
+	kvs.mu.Lock()
+	defer kvs.mu.Unlock()
+
+	if _, ok := kvs.kvTable[k]; !ok {
+		return false
+	}
+
+	delete(kvs.kvTable, k)
+	return true
+}
+
 type opType int
 
 const (
@@ -36,6 +72,7 @@ type Op struct {
 	Type  opType
 	Key   string
 	Value string
+	ID    string
 }
 
 type KVServer struct {
@@ -48,12 +85,50 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	table map[string]string
+	store    KVStore
+	jobTable map[string]job
+}
+
+type job struct {
+	ID   string
+	done chan interface{}
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	ind, term, ok := kv.rf.Start()
+	reply.ID = args.ID
+
+	ind, term, ok := kv.rf.Start(Op{
+		Type: get,
+		Key:  args.Key,
+		ID:   args.ID,
+	})
+
+	if !ok {
+		reply.Err = ErrWrongLeader
+		reply.Time = time.Now()
+		return
+	}
+
+	done := make(chan interface{})
+
+	kv.mu.Lock()
+	kv.jobTable[args.ID] = job{
+		ID:   args.ID,
+		done: done,
+	}
+	kv.mu.Unlock()
+
+	select {
+	case <-time.After(raftTimeout):
+		reply.Err = ErrTimeout
+		reply.Time = time.Now()
+
+		return
+	case v := <-done:
+		// success
+
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -63,6 +138,22 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) apply(msg raft.ApplyMsg) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+
+	cmd, ok := msg.Command.(Op)
+	if !ok {
+		log.Printf("Invalid cmd: %v, discard\n", msg.Command)
+	}
+
+	switch cmd.Type {
+	case get:
+		kv.store.Get(cmd.Key)
+
+	case put, append:
+		kv.store.Put(cmd.Key, cmd.Value)
+	default:
+		log.Printf("Invalid cmd type: %v, discard\n", cmd.Type)
+	}
+
 }
 
 func (kv *KVServer) startLoop() {
@@ -134,7 +225,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	kv.table = make(map[string]string)
+	kv.jobTable = make(map[string]job)
+	kv.store = KVStore{
+		kvTable: make(map[string]interface{}),
+	}
 
 	// You may need initialization code here.
 	kv.startLoop()
