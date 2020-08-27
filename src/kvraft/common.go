@@ -1,12 +1,12 @@
 package kvraft
 
+type Err string
+
 const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
 )
-
-type Err string
 
 // Put or Append
 type PutAppendArgs struct {
@@ -29,6 +29,7 @@ type GetArgs struct {
 }
 
 type GetReply struct {
-	Err   Err
-	Value string
+	Err      Err
+	Value    string
+	LeaderID int
 }

@@ -11,6 +11,8 @@ type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
 	currentLeader int
+	id            int64
+	serialNumber  int
 }
 
 func nrand() int64 {
@@ -24,6 +26,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := &Clerk{
 		servers:       servers,
 		currentLeader: int(nrand()) % len(servers),
+		id:            nrand(),
+		serialNumber:  0,
 	}
 	// You'll have to add code here.
 	return ck

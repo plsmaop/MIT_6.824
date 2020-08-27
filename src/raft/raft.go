@@ -131,7 +131,8 @@ type Raft struct {
 	electionTimeoutPeriod int64
 
 	// handle append entry
-	appendChan chan appendEntriesTaskArgs
+	appendChan    chan appendEntriesTaskArgs
+	currentLeader int
 }
 
 //
@@ -163,6 +164,7 @@ func (rf *Raft) becomeLeader() {
 	}
 
 	rf.state = leader
+	rf.currentLeader = rf.me
 	nextInd := len(rf.logs) + 1
 	for peerInd := range rf.nextIndex {
 		rf.nextIndex[peerInd] = nextInd
@@ -284,6 +286,13 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	return rf.currentTerm, rf.state == leader
+}
+
+func (rf *Raft) GetCurrentLeader() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	return rf.currentLeader
 }
 
 //
@@ -561,6 +570,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term == rf.currentTerm && rf.state == candidate {
 		rf.state = follower
 	}
+	rf.currentLeader = args.LeaderID
 
 	// log inconsistency
 	if args.Term == rf.currentTerm && rf.state == follower && !termMatch {
@@ -980,8 +990,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		matchIndex:  make([]int, len(peers)),
 		state:       follower,
 
-		receivedVote: 0,
-		appendChan:   make(chan appendEntriesTaskArgs, len(peers)),
+		receivedVote:  0,
+		appendChan:    make(chan appendEntriesTaskArgs, len(peers)),
+		currentLeader: -1,
 	}
 	rf.electionTimeout = rf.newTimeout()
 	// Your initialization code here (2A, 2B, 2C).

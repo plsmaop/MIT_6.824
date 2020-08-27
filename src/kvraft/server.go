@@ -1,12 +1,15 @@
 package kvraft
 
 import (
-	"../labgob"
-	"../labrpc"
+	"context"
 	"log"
-	"../raft"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"../labgob"
+	"../labrpc"
+	"../raft"
 )
 
 const Debug = 0
@@ -18,11 +21,21 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+type opType int
+
+const (
+	get opType = iota
+	put
+	append
+)
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Type  opType
+	Key   string
+	Value string
 }
 
 type KVServer struct {
@@ -35,15 +48,42 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	table map[string]string
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	ind, term, ok := kv.rf.Start()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+}
+
+func (kv *KVServer) apply(msg raft.ApplyMsg) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+}
+
+func (kv *KVServer) startLoop() {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		for !kv.killed() {
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		cancel()
+	}()
+
+	// apply
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case applyMsg := <-kv.applyCh:
+			kv.apply(applyMsg)
+		}
+	}()
 }
 
 //
@@ -94,8 +134,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.table = make(map[string]string)
 
 	// You may need initialization code here.
+	kv.startLoop()
 
 	return kv
 }
