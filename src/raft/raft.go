@@ -279,8 +279,10 @@ func (rf *Raft) printf(format string, a ...interface{}) {
 	DPrintf(format+" time: %v", a...)
 }
 
-// return currentTerm and whether this server
+//
+// GetState returns currentTerm and whether this server
 // believes it is the leader.
+//
 func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
 	rf.mu.Lock()
@@ -288,6 +290,10 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.state == leader
 }
 
+//
+// GetCurrentLeader returns current leader
+// if no leader, return -1
+//
 func (rf *Raft) GetCurrentLeader() int {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -360,7 +366,7 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 //
-// example RequestVote RPC arguments structure.
+// RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
@@ -372,7 +378,7 @@ type RequestVoteArgs struct {
 }
 
 //
-// example RequestVote RPC reply structure.
+// RequestVote RPC reply structure.
 // field names must start with capital letters!
 //
 type RequestVoteReply struct {
