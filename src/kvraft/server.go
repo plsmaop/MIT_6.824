@@ -107,6 +107,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	if !ok {
 		reply.Err = ErrWrongLeader
 		reply.Time = time.Now()
+		reply.Leader = kv.rf.GetCurrentLeader()
 		return
 	}
 
