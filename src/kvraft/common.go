@@ -1,7 +1,5 @@
 package kvraft
 
-import "time"
-
 type Err string
 
 const (
@@ -12,30 +10,38 @@ const (
 	ErrUnknown     = "ErrUnknown"
 )
 
+type opType int
+
+const (
+	getType opType = iota
+	putType
+	appendType
+)
+
 // Put or Append
 type PutAppendArgs struct {
 	Key   string
 	Value string
-	Op    string // "Put" or "Append"
+	Op    opType // "Put" or "Append"
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 	ID   string
-	Time time.Time
+	Time int64
 }
 
 type PutAppendReply struct {
 	Err      Err
 	LeaderID int
 	ID       string
-	Time     time.Time
+	Time     int64
 }
 
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
 	ID   string
-	Time time.Time
+	Time int64
 }
 
 type GetReply struct {
@@ -43,5 +49,5 @@ type GetReply struct {
 	Value    string
 	LeaderID int
 	ID       string
-	Time     time.Time
+	Time     int64
 }

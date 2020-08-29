@@ -12,7 +12,7 @@ import (
 	"../raft"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -58,14 +58,6 @@ func (kvs *KVStore) Delete(k string) bool {
 	return true
 }
 
-type opType int
-
-const (
-	get opType = iota
-	put
-	append
-)
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
@@ -104,14 +96,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 
 	_, _, ok := kv.rf.Start(Op{
-		Type: get,
+		Type: getType,
 		Key:  args.Key,
 		ID:   args.ID,
 	})
 
 	if !ok {
 		reply.Err = ErrWrongLeader
-		reply.Time = time.Now()
+		reply.Time = time.Now().UnixNano()
 		reply.LeaderID = kv.rf.GetCurrentLeader()
 		return
 	}
@@ -124,14 +116,19 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	v := <-done
 	value, ok := v.(string)
-	reply.Time = time.Now()
+	reply.Time = time.Now().UnixNano()
 	if !ok {
 		log.Printf("Invalid value: %v, discard\n", value)
 		reply.Err = ErrUnknown
 		return
 	}
 
-	reply.Err = OK
+	if len(value) > 0 {
+		reply.Err = OK
+	} else {
+		reply.Err = ErrNoKey
+	}
+
 	reply.Value = value
 	kv.jobTable.Delete(args.ID)
 }
@@ -145,7 +142,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	_, _, ok := kv.rf.Start(Op{
-		Type:  get,
+		Type:  args.Op,
 		Key:   args.Key,
 		Value: args.Value,
 		ID:    args.ID,
@@ -153,7 +150,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	if !ok {
 		reply.Err = ErrWrongLeader
-		reply.Time = time.Now()
+		reply.Time = time.Now().UnixNano()
 		reply.LeaderID = kv.rf.GetCurrentLeader()
 		return
 	}
@@ -165,7 +162,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	})
 
 	<-done
-	reply.Time = time.Now()
+	reply.Time = time.Now().UnixNano()
 	reply.Err = OK
 	kv.jobTable.Delete(args.ID)
 }
@@ -184,16 +181,19 @@ func (kv *KVServer) apply(msg raft.ApplyMsg) {
 
 	job, _ := entry.(job)
 	switch cmd.Type {
-	case get:
+	case getType:
 		v, ok := kv.store.Get(cmd.Key)
 		if !ok {
 			job.done <- ""
 		} else {
 			job.done <- v
 		}
-	case put, append:
+		close(job.done)
+	case putType, appendType:
+		DPrintf("kk: %v : %v", cmd.Key, cmd.Value)
 		kv.store.Put(cmd.Key, cmd.Value)
 		job.done <- struct{}{}
+		close(job.done)
 	default:
 		log.Printf("Invalid cmd type: %v, discard\n", cmd.Type)
 	}

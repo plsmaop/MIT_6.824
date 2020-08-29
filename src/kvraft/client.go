@@ -2,7 +2,10 @@ package kvraft
 
 import (
 	"crypto/rand"
+	"fmt"
 	"math/big"
+	"sync"
+	"time"
 
 	"../labrpc"
 )
@@ -10,6 +13,7 @@ import (
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	mu            sync.RWMutex
 	currentLeader int
 	id            int64
 	serialNumber  int
@@ -22,6 +26,34 @@ func nrand() int64 {
 	return x
 }
 
+func (ck *Clerk) getTxID() string {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	ck.serialNumber++
+	return fmt.Sprintf("%v:%v", ck.id, ck.serialNumber)
+}
+
+func (ck *Clerk) setCurLeader(leader int) {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	if leader < 0 || leader >= len(ck.servers) {
+		leader = int(nrand()) % len(ck.servers)
+	}
+	ck.currentLeader = leader
+}
+
+func (ck *Clerk) getCurLeader() int {
+	ck.mu.RLock()
+	defer ck.mu.RUnlock()
+
+	return ck.currentLeader
+}
+
+//
+// MakeClerk is the constructor of Clerk
+//
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := &Clerk{
 		servers:       servers,
@@ -33,8 +65,17 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	return ck
 }
 
+func (ck *Clerk) get(args *GetArgs, reply *GetReply) {
+	reply = &GetReply{}
+	ok := ck.servers[ck.getCurLeader()].Call("KVServer.Get", args, reply)
+	for !ok {
+		reply = &GetReply{}
+		ok = ck.servers[ck.getCurLeader()].Call("KVServer.Get", args, reply)
+	}
+}
+
 //
-// fetch the current value for a key.
+// Get fetch the current value for a key.
 // returns "" if the key does not exist.
 // keeps trying forever in the face of all other errors.
 //
@@ -48,11 +89,39 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
+	id := ck.getTxID()
+	args := GetArgs{
+		Key:  key,
+		Time: time.Now().UnixNano(),
+		ID:   id,
+	}
+	reply := GetReply{}
+	ck.get(&args, &reply)
+
+	switch reply.Err {
+	case OK:
+		return reply.Value
+	case ErrNoKey:
+		return ""
+	case ErrWrongLeader:
+		ck.setCurLeader(reply.LeaderID)
+		ck.get(&args, &reply)
+	}
+
 	return ""
 }
 
+func (ck *Clerk) putAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	reply = &PutAppendReply{}
+	ok := ck.servers[ck.getCurLeader()].Call("KVServer.PutAppend", args, reply)
+	for !ok {
+		reply = &PutAppendReply{}
+		ok = ck.servers[ck.getCurLeader()].Call("KVServer.PutAppend", args, reply)
+	}
+}
+
 //
-// shared by Put and Append.
+// PutAppend shared by Put and Append.
 //
 // you can send an RPC with code like this:
 // ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
@@ -61,13 +130,33 @@ func (ck *Clerk) Get(key string) string {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 //
-func (ck *Clerk) PutAppend(key string, value string, op string) {
+func (ck *Clerk) PutAppend(key string, value string, op opType) {
 	// You will have to modify this function.
+	id := ck.getTxID()
+	args := PutAppendArgs{
+		Key:   key,
+		Value: value,
+		Time:  time.Now().UnixNano(),
+		Op:    op,
+		ID:    id,
+	}
+
+	reply := PutAppendReply{}
+	ck.putAppend(&args, &reply)
+
+	switch reply.Err {
+	case OK:
+		return
+	case ErrWrongLeader:
+		ck.setCurLeader(reply.LeaderID)
+		ck.putAppend(&args, &reply)
+	}
+
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+	ck.PutAppend(key, value, putType)
 }
 func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
+	ck.PutAppend(key, value, appendType)
 }
