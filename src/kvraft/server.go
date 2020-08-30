@@ -2,6 +2,7 @@ package kvraft
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -58,18 +59,27 @@ func (kvs *KVStore) Delete(k string) bool {
 	return true
 }
 
+func (kvs *KVStore) AtomicOp(k string, op func(interface{}) interface{}) bool {
+	kvs.mu.Lock()
+	defer kvs.mu.Unlock()
+
+	kvs.kvTable[k] = op(kvs.kvTable[k])
+	return true
+}
+
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Type  opType
-	Key   string
-	Value string
-	ID    string
+	Type     opType
+	Key      string
+	Value    interface{}
+	ClientID string
+	SeqNum   int
 }
 
 type KVServer struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
@@ -78,125 +88,215 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	store    KVStore
-	jobTable KVStore
+	store       KVStore
+	jobTable    KVStore
+	clientTable map[string]int
 }
 
 type job struct {
-	ID   string
-	done chan interface{}
+	ind  int
+	op   Op
+	done chan Op
 }
 
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+func (kv *KVServer) Get(args Args, reply *GetReply) {
 	// Your code here.
-	reply.ID = args.ID
-	_, isProcessing := kv.jobTable.Get(args.ID)
-	if isProcessing {
+	kv.mu.Lock()
+	opType := args.GetOp()
+	cID := args.GetClientID()
+	seqNum := args.GetSeqNum()
+
+	if kv.clientTable[cID] >= seqNum {
+		// applied
+		reply.Err = ErrDuplicate
+		reply.Time = time.Now().UnixNano()
+		kv.mu.Unlock()
 		return
 	}
 
-	_, _, ok := kv.rf.Start(Op{
-		Type: getType,
-		Key:  args.Key,
-		ID:   args.ID,
+	ind, _, ok := kv.rf.Start(Op{
+		Type:     getType,
+		Key:      args.GetKey(),
+		ClientID: cID,
+		SeqNum:   seqNum,
 	})
 
 	if !ok {
 		reply.Err = ErrWrongLeader
 		reply.Time = time.Now().UnixNano()
-		reply.LeaderID = kv.rf.GetCurrentLeader()
+		kv.mu.Unlock()
 		return
 	}
 
-	done := make(chan interface{})
-	kv.jobTable.Put(args.ID, job{
-		ID:   args.ID,
+	kv.clientTable[cID] = seqNum
+	kv.mu.Unlock()
+
+	done := make(chan Op)
+	kv.jobTable.AtomicOp(fmt.Sprintf("%v", ind), kv.appendJobWrapper(job{
+		ind: ind,
+		op: Op{
+			Type:     opType,
+			ClientID: cID,
+			SeqNum:   seqNum,
+		},
 		done: done,
-	})
+	}))
 
-	v := <-done
-	value, ok := v.(string)
+	opDone := <-done
 	reply.Time = time.Now().UnixNano()
-	if !ok {
-		log.Printf("Invalid value: %v, discard\n", value)
-		reply.Err = ErrUnknown
-		return
-	}
-
-	if len(value) > 0 {
-		reply.Err = OK
+	if opDone.Type != opType || opDone.ClientID != cID || opDone.SeqNum != seqNum {
+		reply.Err = ErrFail
+		kv.printf("%v:%v failed", cID, seqNum)
 	} else {
-		reply.Err = ErrNoKey
-	}
+		if opDone.Value != nil {
+			reply.Err = OK
+			v, _ := opDone.Value.(string)
+			reply.Value = v
+		} else {
+			reply.Err = ErrNoKey
+			reply.Value = ""
+		}
 
-	reply.Value = value
-	kv.jobTable.Delete(args.ID)
+		kv.printf("%v:%v finished", cID, seqNum)
+	}
 }
 
-func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+func (kv *KVServer) PutAppend(args Args, reply *PutAppendReply) {
 	// Your code here.
-	reply.ID = args.ID
-	_, isProcessing := kv.jobTable.Get(args.ID)
-	if isProcessing {
+	kv.mu.Lock()
+	opType := args.GetOp()
+	cID := args.GetClientID()
+	seqNum := args.GetSeqNum()
+
+	if kv.clientTable[cID] >= seqNum {
+		// applied
+		reply.Err = ErrDuplicate
+		reply.Time = time.Now().UnixNano()
+		kv.mu.Unlock()
 		return
 	}
 
-	_, _, ok := kv.rf.Start(Op{
-		Type:  args.Op,
-		Key:   args.Key,
-		Value: args.Value,
-		ID:    args.ID,
+	ind, _, ok := kv.rf.Start(Op{
+		Type:     opType,
+		Key:      args.GetKey(),
+		Value:    args.GetValue(),
+		ClientID: cID,
+		SeqNum:   seqNum,
 	})
 
 	if !ok {
 		reply.Err = ErrWrongLeader
 		reply.Time = time.Now().UnixNano()
-		reply.LeaderID = kv.rf.GetCurrentLeader()
+		kv.mu.Unlock()
 		return
 	}
 
-	done := make(chan interface{})
-	kv.jobTable.Put(args.ID, job{
-		ID:   args.ID,
-		done: done,
-	})
+	kv.clientTable[cID] = seqNum
+	kv.mu.Unlock()
 
-	<-done
+	done := make(chan Op)
+	kv.jobTable.AtomicOp(fmt.Sprintf("%v", ind), kv.appendJobWrapper(job{
+		ind: ind,
+		op: Op{
+			Type:     opType,
+			ClientID: cID,
+			SeqNum:   seqNum,
+		},
+		done: done,
+	}))
+
+	opDone := <-done
 	reply.Time = time.Now().UnixNano()
-	reply.Err = OK
-	kv.jobTable.Delete(args.ID)
+	if opDone.Type != opType || opDone.ClientID != cID || opDone.SeqNum != seqNum {
+		reply.Err = ErrFail
+		kv.printf("%v:%v failed", cID, seqNum)
+	} else {
+		reply.Err = OK
+		kv.printf("%v:%v finished", cID, seqNum)
+	}
 }
 
 func (kv *KVServer) apply(msg raft.ApplyMsg) {
+	if !msg.CommandValid {
+		return
+	}
+
 	cmd, ok := msg.Command.(Op)
 	if !ok {
 		log.Printf("Invalid cmd: %v, discard\n", msg.Command)
 	}
 
-	entry, ok := kv.jobTable.Get(cmd.ID)
+	cmdInd := fmt.Sprintf("%v", msg.CommandIndex)
+	entry, ok := kv.jobTable.Get(cmdInd)
 	if !ok {
-		log.Printf("Job ID: %v is handled\n", cmd.ID)
 		return
 	}
 
-	job, _ := entry.(job)
+	jobs, _ := entry.([]job)
 	switch cmd.Type {
 	case getType:
-		v, ok := kv.store.Get(cmd.Key)
-		if !ok {
-			job.done <- ""
-		} else {
-			job.done <- v
+		v, _ := kv.store.Get(cmd.Key)
+		for _, job := range jobs {
+			cmd.Value = v
+			job.done <- cmd
+			close(job.done)
 		}
-		close(job.done)
-	case putType, appendType:
-		DPrintf("kk: %v : %v", cmd.Key, cmd.Value)
+		kv.jobTable.Delete(cmdInd)
+	case putType:
 		kv.store.Put(cmd.Key, cmd.Value)
-		job.done <- struct{}{}
-		close(job.done)
+		for _, job := range jobs {
+			job.done <- cmd
+			close(job.done)
+		}
+		kv.jobTable.Delete(cmdInd)
+	case appendType:
+		v, _ := cmd.Value.(string)
+		kv.store.AtomicOp(cmd.Key, kv.appendWrapper(v))
+		for _, job := range jobs {
+			job.done <- cmd
+			close(job.done)
+		}
+		kv.jobTable.Delete(cmdInd)
 	default:
 		log.Printf("Invalid cmd type: %v, discard\n", cmd.Type)
 	}
+}
+
+func (kv *KVServer) appendJobWrapper(j job) func(interface{}) interface{} {
+	return func(v interface{}) interface{} {
+		val, ok := v.([]job)
+		if !ok {
+			return []job{j}
+		}
+
+		return append(val, j)
+	}
+}
+
+func (kv *KVServer) appendWrapper(s string) func(interface{}) interface{} {
+	return func(v interface{}) interface{} {
+		val, ok := v.(string)
+		if !ok {
+			return s
+		}
+
+		kv.printf("FFF: %v", val+s)
+		return val + s
+	}
+}
+
+func (kv *KVServer) isReqDuplicated(cID string, seqNum int) bool {
+	kv.mu.RLock()
+	defer kv.mu.RUnlock()
+
+	return kv.clientTable[cID] >= seqNum
+}
+
+func (kv *KVServer) updateClientSeqNum(cID string, seqNum int) {
+	kv.mu.Lock()
+	kv.mu.Unlock()
+
+	kv.clientTable[cID] = seqNum
 }
 
 func (kv *KVServer) startLoop() {
@@ -216,10 +316,19 @@ func (kv *KVServer) startLoop() {
 			case <-ctx.Done():
 				return
 			case applyMsg := <-kv.applyCh:
+				kv.printf("applyMsg: %v", applyMsg)
 				kv.apply(applyMsg)
 			}
 		}()
 	}
+}
+
+//
+// for debug
+//
+func (kv *KVServer) printf(format string, a ...interface{}) {
+	a = append([]interface{}{kv.me}, a...)
+	DPrintf("%v: "+format, a...)
 }
 
 //
@@ -277,6 +386,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.store = KVStore{
 		kvTable: make(map[string]interface{}),
 	}
+
+	kv.clientTable = make(map[string]int)
 
 	// You may need initialization code here.
 	kv.startLoop()
