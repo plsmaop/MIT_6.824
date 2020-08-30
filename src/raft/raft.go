@@ -821,12 +821,9 @@ func (rf *Raft) getCommitedEntriesToApply() []ApplyMsg {
 	}
 
 	for i := rf.lastApplied; i < commitIndex; i++ {
-		if rf.logs[i].Type != stateMachineCmdEntry {
-			continue
-		}
 		entriesToApply = append(entriesToApply, ApplyMsg{
 			Command:      rf.logs[i].Command,
-			CommandValid: true,
+			CommandValid: rf.logs[i].Type == stateMachineCmdEntry,
 			CommandIndex: rf.logs[i].CommandIndex,
 		})
 	}
@@ -856,15 +853,13 @@ func (rf *Raft) startLoop() {
 				return
 			default:
 				entriesToApply := rf.getCommitedEntriesToApply()
-				lastApplied := rf.lastApplied
 				for _, applyMsg := range entriesToApply {
 					rf.applyCh <- applyMsg
 					rf.printf("%d apply index: %d", rf.me, applyMsg.CommandIndex)
-					lastApplied = applyMsg.CommandIndex
 				}
 
 				rf.mu.Lock()
-				rf.lastApplied = lastApplied
+				rf.lastApplied += len(entriesToApply)
 				rf.mu.Unlock()
 			}
 
@@ -934,6 +929,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 
+	log.Printf("%v", command)
 	term := rf.currentTerm
 	cmdInd := rf.getNextCmdIndex()
 	rf.appendLogs(entry{
