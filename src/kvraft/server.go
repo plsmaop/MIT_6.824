@@ -13,7 +13,7 @@ import (
 	"../raft"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -101,6 +101,7 @@ type job struct {
 
 func (kv *KVServer) Get(args Args, reply *GetReply) {
 	// Your code here.
+	kv.printf("get args: %v", args)
 	kv.mu.Lock()
 	opType := args.GetOp()
 	cID := args.GetClientID()
@@ -163,6 +164,7 @@ func (kv *KVServer) Get(args Args, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args Args, reply *PutAppendReply) {
 	// Your code here.
+	kv.printf("put append args: %v", args)
 	kv.mu.Lock()
 	opType := args.GetOp()
 	cID := args.GetClientID()
@@ -229,10 +231,12 @@ func (kv *KVServer) apply(msg raft.ApplyMsg) {
 	cmdInd := fmt.Sprintf("%v", msg.CommandIndex)
 	entry, ok := kv.jobTable.Get(cmdInd)
 	if !ok {
+		kv.printf("no need to apply: %v", msg)
 		return
 	}
 
 	jobs, _ := entry.([]job)
+	kv.printf("JOBS: %v", jobs)
 	switch cmd.Type {
 	case getType:
 		v, _ := kv.store.Get(cmd.Key)
@@ -312,12 +316,14 @@ func (kv *KVServer) startLoop() {
 	// apply
 	for i := 0; i < workerNum; i++ {
 		go func() {
-			select {
-			case <-ctx.Done():
-				return
-			case applyMsg := <-kv.applyCh:
-				kv.printf("applyMsg: %v", applyMsg)
-				kv.apply(applyMsg)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case applyMsg := <-kv.applyCh:
+					kv.printf("applyMsg: %v", applyMsg)
+					kv.apply(applyMsg)
+				}
 			}
 		}()
 	}

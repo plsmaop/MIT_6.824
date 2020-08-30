@@ -35,10 +35,8 @@ func (ck *Clerk) getSeqNum() int {
 	ck.mu.Lock()
 	defer ck.mu.Unlock()
 
-	seqNum := ck.seqNumber
 	ck.seqNumber++
-
-	return seqNum
+	return ck.seqNumber
 }
 
 func (ck *Clerk) setCurLeader(leader int) {
