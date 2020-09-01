@@ -82,6 +82,7 @@ func (ck *Clerk) sendGet(args *GetArgs) GetReply {
 	ok := ck.servers[leader].Call("KVServer.Get", args, &reply)
 
 	for !ok || reply.Err == ErrWrongLeader || reply.Err == ErrFail {
+		args.Time = time.Now().UnixNano()
 		if !ok || reply.Err == ErrFail {
 			time.Sleep(waitTime * time.Nanosecond)
 			waitTime *= waitTime
@@ -89,7 +90,11 @@ func (ck *Clerk) sendGet(args *GetArgs) GetReply {
 
 		DPrintf("send ID(%v:%v): %v", args.ClientID, args.SeqNum, args.Key)
 		reply = GetReply{}
-		leader = (leader + 1) % len(ck.servers)
+
+		if reply.Err == ErrWrongLeader {
+			leader = (leader + 1) % len(ck.servers)
+		}
+
 		ok = ck.servers[leader].Call("KVServer.Get", args, &reply)
 	}
 
@@ -149,6 +154,7 @@ func (ck *Clerk) sendPutAppend(args *PutAppendArgs) PutAppendReply {
 	ok := ck.servers[leader].Call("KVServer.PutAppend", args, &reply)
 
 	for !ok || reply.Err == ErrWrongLeader || reply.Err == ErrFail {
+		args.Time = time.Now().UnixNano()
 		if !ok || reply.Err == ErrFail {
 			time.Sleep(waitTime * time.Nanosecond)
 			waitTime *= waitTime
@@ -156,7 +162,11 @@ func (ck *Clerk) sendPutAppend(args *PutAppendArgs) PutAppendReply {
 
 		DPrintf("send ID(%v:%v): %v: %v", args.ClientID, args.SeqNum, args.Key, args.Value)
 		reply = PutAppendReply{}
-		leader = (leader + 1) % len(ck.servers)
+
+		if reply.Err == ErrWrongLeader {
+			leader = (leader + 1) % len(ck.servers)
+		}
+
 		ok = ck.servers[leader].Call("KVServer.PutAppend", args, &reply)
 	}
 
