@@ -12,6 +12,10 @@ import (
 	"../labrpc"
 )
 
+const (
+	reqTimeout = 2 * time.Second
+)
+
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
@@ -66,13 +70,27 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	return ck
 }
 
+func (ck *Clerk) send(leader int64, rpcName string, args Args, reply Reply) bool {
+	doneChan := make(chan bool)
+	go func() {
+		doneChan <- ck.servers[leader].Call(rpcName, args, reply)
+	}()
+
+	select {
+	case <-time.After(reqTimeout):
+		return false
+	case ok := <-doneChan:
+		return ok
+	}
+}
+
 func (ck *Clerk) sendGet(args *GetArgs) GetReply {
 	reply := GetReply{}
 	leader := ck.getCurLeader()
 	waitTime := expFallbackWaitTime
 
 	ck.printf("send %v to %v", args, leader)
-	ok := ck.servers[leader].Call("KVServer.Get", args, &reply)
+	ok := ck.send(leader, "KVServer.Get", args, &reply)
 	ck.printf("received: %v : %v from %v", args, reply, leader)
 
 	for !ok || reply.Err == ErrWrongLeader || reply.Err == ErrFail {
@@ -94,7 +112,7 @@ func (ck *Clerk) sendGet(args *GetArgs) GetReply {
 		ck.printf("send %v to %v", args, leader)
 		reply = GetReply{}
 
-		ok = ck.servers[leader].Call("KVServer.Get", args, &reply)
+		ok = ck.send(leader, "KVServer.Get", args, &reply)
 		ck.printf("received: %v : %v from %v", args, reply, leader)
 	}
 
@@ -152,7 +170,7 @@ func (ck *Clerk) sendPutAppend(args *PutAppendArgs) PutAppendReply {
 	waitTime := expFallbackWaitTime
 
 	ck.printf("send %v to %v", args, leader)
-	ok := ck.servers[leader].Call("KVServer.PutAppend", args, &reply)
+	ok := ck.send(leader, "KVServer.PutAppend", args, &reply)
 	ck.printf("received: %v : %v from %v", args, reply, leader)
 
 	for !ok || reply.Err == ErrWrongLeader || reply.Err == ErrFail {
@@ -173,7 +191,7 @@ func (ck *Clerk) sendPutAppend(args *PutAppendArgs) PutAppendReply {
 		ck.printf("send %v to %v", args, leader)
 		reply = PutAppendReply{}
 
-		ok = ck.servers[leader].Call("KVServer.PutAppend", args, &reply)
+		ok = ck.send(leader, "KVServer.PutAppend", args, &reply)
 		ck.printf("received: %v : %v from %v", args, reply, leader)
 	}
 
