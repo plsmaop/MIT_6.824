@@ -2,15 +2,15 @@ package kvraft
 
 const debug = 0
 
-type Err int
+type Err string
 
 const (
-	OK Err = iota
-	ErrNoKey
-	ErrWrongLeader
-	ErrDuplicate
-	ErrFail
-	ErrUnknown
+	OK             Err = "OK"
+	ErrNoKey       Err = "ErrNoKey"
+	ErrWrongLeader Err = "ErrWrongLeader"
+	ErrDuplicate   Err = "ErrDuplicate"
+	ErrFail        Err = "ErrFail"
+	ErrUnknown     Err = "ErrUnknown"
 )
 
 type opType string

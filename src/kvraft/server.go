@@ -169,7 +169,7 @@ func (kv *KVServer) startRequest(args Args, reply Reply) (raftLogInd int, succes
 	if !ok {
 		reply.SetErr(ErrWrongLeader)
 		reply.SetTime(time.Now().UnixNano())
-		kv.printf("I am no leader: %v", args)
+		kv.printf("I am no leader: %v : %v", args, reply)
 		return -1, false
 	}
 
@@ -210,6 +210,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	ind, ok := kv.startRequest(args, reply)
 	if !ok {
 		// request is handled or stale
+		kv.printf("Dont handle %v : %v", args, reply)
 		return
 	}
 
@@ -302,43 +303,35 @@ func (kv *KVServer) apply(msg raft.ApplyMsg) {
 		return
 	}
 
+	switch cmd.Type {
+	case getType:
+		v, _ := kv.store.Get(cmd.Key)
+		cmd.Value = v
+	case putType:
+		kv.store.Put(cmd.Key, cmd.Value)
+	case appendType:
+		v, _ := cmd.Value.(string)
+		kv.store.AtomicOp(cmd.Key, kv.appendWrapper(v))
+	default:
+		log.Printf("Invalid cmd type: %v, discard\n", cmd.Type)
+		return
+	}
+
 	cmdInd := fmt.Sprintf("%v", msg.CommandIndex)
 	entry, ok := kv.jobTable.Get(cmdInd)
 	if !ok {
-		kv.printf("no need to apply: %v", msg)
 		return
 	}
 
 	jobs, _ := entry.([]job)
 	kv.printf("JOBS: %v", jobs)
-	switch cmd.Type {
-	case getType:
-		v, _ := kv.store.Get(cmd.Key)
-		for _, job := range jobs {
-			cmd.Value = v
-			job.done <- cmd
-			close(job.done)
-		}
-		kv.jobTable.Delete(cmdInd)
-	case putType:
-		kv.store.Put(cmd.Key, cmd.Value)
-		for _, job := range jobs {
-			job.done <- cmd
-			close(job.done)
-		}
-		kv.jobTable.Delete(cmdInd)
-	case appendType:
-		v, _ := cmd.Value.(string)
-		kv.store.AtomicOp(cmd.Key, kv.appendWrapper(v))
-		for _, job := range jobs {
-			job.done <- cmd
-			close(job.done)
-		}
-		kv.jobTable.Delete(cmdInd)
-	default:
-		log.Printf("Invalid cmd type: %v, discard\n", cmd.Type)
+
+	for _, job := range jobs {
+		job.done <- cmd
+		close(job.done)
 	}
 
+	kv.jobTable.Delete(cmdInd)
 	kv.updateAppliedInd(int64(msg.CommandIndex))
 }
 
@@ -417,6 +410,10 @@ func (kv *KVServer) startLoop() {
 			case <-ctx.Done():
 				return
 			case applyMsg := <-kv.applyCh:
+				if !applyMsg.CommandValid {
+					continue
+				}
+
 				kv.printf("applyMsg: %v", applyMsg)
 				kv.apply(applyMsg)
 			}
