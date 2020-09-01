@@ -929,7 +929,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 
-	log.Printf("%v", command)
 	term := rf.currentTerm
 	cmdInd := rf.getNextCmdIndex()
 	rf.appendLogs(entry{

@@ -3,9 +3,9 @@ package kvraft
 import (
 	"crypto/rand"
 	"fmt"
-	"log"
 	"math/big"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"../labrpc"
@@ -16,8 +16,8 @@ type Clerk struct {
 	// You will have to modify this struct.
 	mu            sync.RWMutex
 	id            string
-	currentLeader int
-	seqNumber     int
+	currentLeader int64
+	seqNumber     int64
 }
 
 func nrand() int64 {
@@ -31,32 +31,24 @@ const (
 	expFallbackWaitTime time.Duration = 2
 )
 
-func (ck *Clerk) getSeqNum() int {
-	ck.mu.Lock()
-	defer ck.mu.Unlock()
-
-	ck.seqNumber++
-	return ck.seqNumber
+func (ck *Clerk) getSeqNum() int64 {
+	return atomic.AddInt64(&ck.seqNumber, 1)
 }
 
-func (ck *Clerk) setCurLeader(leader int) {
-	ck.mu.Lock()
-	defer ck.mu.Unlock()
+func (ck *Clerk) setCurLeader(leader int64) {
+	ck.printf("Set leader to %v", leader)
+	atomic.StoreInt64(&ck.currentLeader, leader)
+}
 
-	if leader < 0 || leader >= len(ck.servers) {
-		leader = int(nrand()) % len(ck.servers)
+func (ck *Clerk) getCurLeader() int64 {
+	return atomic.LoadInt64(&ck.currentLeader)
+}
+
+func (ck *Clerk) printf(format string, a ...interface{}) {
+	if debug > 0 {
+		a = append([]interface{}{ck.id}, a...)
+		ck.printf("%v"+format, a...)
 	}
-
-	log.Printf("Set leader to %v", leader)
-	ck.currentLeader = leader
-}
-
-func (ck *Clerk) getCurLeader() int {
-	ck.mu.RLock()
-	defer ck.mu.RUnlock()
-
-	log.Printf("Get leader to %v", ck.currentLeader)
-	return ck.currentLeader
 }
 
 //
@@ -65,7 +57,7 @@ func (ck *Clerk) getCurLeader() int {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := &Clerk{
 		servers:       servers,
-		currentLeader: int(nrand()) % len(servers),
+		currentLeader: int64(nrand()) % int64(len(servers)),
 		id:            fmt.Sprintf("%v", nrand()),
 		seqNumber:     0,
 	}
@@ -82,18 +74,23 @@ func (ck *Clerk) sendGet(args *GetArgs) GetReply {
 	ok := ck.servers[leader].Call("KVServer.Get", args, &reply)
 
 	for !ok || reply.Err == ErrWrongLeader || reply.Err == ErrFail {
-		args.Time = time.Now().UnixNano()
-		if !ok || reply.Err == ErrFail {
+
+		if !ok {
 			time.Sleep(waitTime * time.Nanosecond)
 			waitTime *= waitTime
 		}
 
-		DPrintf("send ID(%v:%v): %v", args.ClientID, args.SeqNum, args.Key)
-		reply = GetReply{}
+		if reply.Err == ErrFail {
+			ck.printf("failed : %v", args)
+		}
 
 		if reply.Err == ErrWrongLeader {
-			leader = (leader + 1) % len(ck.servers)
+			leader = (leader + 1) % int64(len(ck.servers))
 		}
+
+		args.Time = time.Now().UnixNano()
+		DPrintf("send ID(%v:%v): %v", args.ClientID, args.SeqNum, args.Key)
+		reply = GetReply{}
 
 		ok = ck.servers[leader].Call("KVServer.Get", args, &reply)
 	}
@@ -112,10 +109,10 @@ func (ck *Clerk) get(args *GetArgs) string {
 	case ErrNoKey:
 		return ""
 	case ErrDuplicate:
-		log.Printf("Request Processed, discard")
+		ck.printf("Request Processed, discard")
 		return ""
 	default:
-		log.Printf("No valid err type: %v", reply.Err)
+		ck.printf("No valid err type: %v", reply.Err)
 		return ""
 	}
 }
@@ -139,7 +136,7 @@ func (ck *Clerk) Get(key string) string {
 		Key:      key,
 		Time:     time.Now().UnixNano(),
 		ClientID: ck.id,
-		SeqNum:   ck.getSeqNum(),
+		SeqNum:   int64(ck.getSeqNum()),
 	}
 
 	return ck.get(&args)
@@ -154,18 +151,23 @@ func (ck *Clerk) sendPutAppend(args *PutAppendArgs) PutAppendReply {
 	ok := ck.servers[leader].Call("KVServer.PutAppend", args, &reply)
 
 	for !ok || reply.Err == ErrWrongLeader || reply.Err == ErrFail {
-		args.Time = time.Now().UnixNano()
-		if !ok || reply.Err == ErrFail {
+		if !ok {
 			time.Sleep(waitTime * time.Nanosecond)
 			waitTime *= waitTime
 		}
 
-		DPrintf("send ID(%v:%v): %v: %v", args.ClientID, args.SeqNum, args.Key, args.Value)
-		reply = PutAppendReply{}
+		if reply.Err == ErrFail {
+			ck.printf("failed : %v", args)
+		}
 
 		if reply.Err == ErrWrongLeader {
-			leader = (leader + 1) % len(ck.servers)
+			leader = (leader + 1) % int64(len(ck.servers))
+			ck.printf("send to %v\n", leader)
 		}
+
+		args.Time = time.Now().UnixNano()
+		DPrintf("send ID(%v:%v): %v: %v", args.ClientID, args.SeqNum, args.Key, args.Value)
+		reply = PutAppendReply{}
 
 		ok = ck.servers[leader].Call("KVServer.PutAppend", args, &reply)
 	}
@@ -181,10 +183,10 @@ func (ck *Clerk) putAppend(args *PutAppendArgs) {
 	case OK:
 		return
 	case ErrDuplicate:
-		log.Printf("Request Processed, discard")
+		ck.printf("Request Processed, discard")
 		return
 	default:
-		log.Printf("Invalid Reply, drop")
+		ck.printf("Invalid Reply, drop")
 		return
 	}
 }
