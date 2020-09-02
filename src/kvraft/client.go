@@ -89,7 +89,7 @@ func (ck *Clerk) sendGet(args *GetArgs) GetReply {
 	leader := ck.getCurLeader()
 	waitTime := expFallbackWaitTime
 
-	ck.printf("send %v to %v", args, leader)
+	ck.printf("send %v(%v) to %v", args, reply, leader)
 	ok := ck.send(leader, "KVServer.Get", args, &reply)
 	ck.printf("received: %v : %v from %v", args, reply, leader)
 
@@ -109,8 +109,8 @@ func (ck *Clerk) sendGet(args *GetArgs) GetReply {
 		}
 
 		args.Time = time.Now().UnixNano()
-		ck.printf("send %v to %v", args, leader)
 		reply = GetReply{}
+		ck.printf("send %v(%v) to %v", args, reply, leader)
 
 		ok = ck.send(leader, "KVServer.Get", args, &reply)
 		ck.printf("received: %v : %v from %v", args, reply, leader)
@@ -169,7 +169,7 @@ func (ck *Clerk) sendPutAppend(args *PutAppendArgs) PutAppendReply {
 	leader := ck.getCurLeader()
 	waitTime := expFallbackWaitTime
 
-	ck.printf("send %v to %v", args, leader)
+	ck.printf("send %v(%v) to %v", args, reply, leader)
 	ok := ck.send(leader, "KVServer.PutAppend", args, &reply)
 	ck.printf("received: %v : %v from %v", args, reply, leader)
 
@@ -188,8 +188,8 @@ func (ck *Clerk) sendPutAppend(args *PutAppendArgs) PutAppendReply {
 		}
 
 		args.Time = time.Now().UnixNano()
-		ck.printf("send %v to %v", args, leader)
 		reply = PutAppendReply{}
+		ck.printf("send %v(%v) to %v", args, reply, leader)
 
 		ok = ck.send(leader, "KVServer.PutAppend", args, &reply)
 		ck.printf("received: %v : %v from %v", args, reply, leader)
