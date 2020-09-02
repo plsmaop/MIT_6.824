@@ -105,7 +105,7 @@ type client struct {
 	seqNum            int64
 	currentWorkingInd int
 	reqStatus         reqStatus
-	reply             Reply
+	lastExecutedValue string
 }
 
 type job struct {
@@ -120,6 +120,22 @@ func (kv *KVServer) updateAppliedInd(ind int64) {
 
 func (kv *KVServer) getAppliedInd() int64 {
 	return atomic.LoadInt64(&kv.appliedInd)
+}
+
+func (kv *KVServer) setClient(c *client) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	client, ok := kv.clientTable[c.clientID]
+	if !ok {
+		kv.clientTable[c.clientID] = c
+		return
+	}
+
+	client.seqNum = c.seqNum
+	client.currentWorkingInd = c.currentWorkingInd
+	client.reqStatus = c.reqStatus
+	client.lastExecutedValue = c.lastExecutedValue
 }
 
 func (kv *KVServer) startRequest(args Args, reply Reply) (raftLogInd int, success bool) {
@@ -144,16 +160,17 @@ func (kv *KVServer) startRequest(args Args, reply Reply) (raftLogInd int, succes
 				// successs request
 				reply.SetErr(OK)
 				reply.SetTime(time.Now().UnixNano())
-				reply.SetValue(c.reply.GetValue())
-				kv.printf("Handled req: %v, reply", args, c.reply)
+				reply.SetValue(c.lastExecutedValue)
+				kv.printf("Handled req: %v, reply", args, c.lastExecutedValue)
 				return -1, false
 			case working:
 				// become new handler
+				kv.printf("Working req: %v, reply", args, c.lastExecutedValue)
 				return c.currentWorkingInd, true
 
 			case failed:
 				// submit another request
-
+				kv.printf("Failed req: %v, reply", args, c.lastExecutedValue)
 			}
 		}
 	}
@@ -178,7 +195,7 @@ func (kv *KVServer) startRequest(args Args, reply Reply) (raftLogInd int, succes
 		seqNum:            seqNum,
 		currentWorkingInd: ind,
 		reqStatus:         working,
-		reply:             nil,
+		lastExecutedValue: "",
 	}
 	return ind, true
 }
@@ -190,16 +207,16 @@ func (kv *KVServer) setClientReqStatue(cID string, status reqStatus) {
 	kv.clientTable[cID].reqStatus = status
 }
 
-func (kv *KVServer) setClientReply(cID string, reply Reply) {
+func (kv *KVServer) setClientLastExecutedValue(cID string, v string) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	kv.clientTable[cID].reply = reply
+	kv.clientTable[cID].lastExecutedValue = v
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	kv.printf("get args: %v", args)
+	kv.printf("get args: %v, reply: %v", args, reply)
 	opType := args.GetOp()
 	cID := args.GetClientID()
 	seqNum := args.GetSeqNum()
@@ -243,7 +260,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			reply.Value = ""
 		}
 
-		kv.setClientReply(cID, reply)
+		kv.setClientLastExecutedValue(cID, reply.Value)
 		kv.setClientReqStatue(cID, successed)
 		kv.printf("%v:%v finished", cID, seqNum)
 	}
@@ -251,7 +268,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	kv.printf("put append args: %v", args)
+	kv.printf("put append args: %v, reply: %v", args, reply)
 	opType := args.GetOp()
 	cID := args.GetClientID()
 	seqNum := args.GetSeqNum()
@@ -262,6 +279,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	ind, ok := kv.startRequest(args, reply)
 	if !ok {
 		// request is handled or stale
+		kv.printf("Dont handle %v : %v", args, reply)
 		return
 	}
 
@@ -287,7 +305,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	} else {
 		reply.Err = OK
 		kv.printf("%v:%v finished", cID, seqNum)
-		kv.setClientReply(cID, reply)
+		kv.setClientLastExecutedValue(cID, "")
 		kv.setClientReqStatue(cID, successed)
 	}
 }
@@ -320,6 +338,19 @@ func (kv *KVServer) apply(msg raft.ApplyMsg) {
 	cmdInd := fmt.Sprintf("%v", msg.CommandIndex)
 	entry, ok := kv.jobTable.Get(cmdInd)
 	if !ok {
+		// add last executed
+		v := ""
+		v, ok := cmd.Value.(string)
+		if !ok {
+			v = ""
+		}
+		kv.setClient(&client{
+			clientID:          cmd.ClientID,
+			seqNum:            cmd.SeqNum,
+			currentWorkingInd: msg.CommandIndex,
+			reqStatus:         successed,
+			lastExecutedValue: v,
+		})
 		return
 	}
 
