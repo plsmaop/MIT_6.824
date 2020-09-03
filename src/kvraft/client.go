@@ -85,12 +85,12 @@ func (ck *Clerk) send(leader int64, rpcName string, args Args, reply Reply) bool
 }
 
 func (ck *Clerk) sendGet(args *GetArgs) GetReply {
-	reply := GetReply{}
+	reply := &GetReply{}
 	leader := ck.getCurLeader()
 	waitTime := expFallbackWaitTime
 
 	ck.printf("send %v(%v) to %v", args, reply, leader)
-	ok := ck.send(leader, "KVServer.Get", args, &reply)
+	ok := ck.send(leader, "KVServer.Get", args, reply)
 	ck.printf("received: %v : %v from %v", args, reply, leader)
 
 	for !ok || reply.Err == ErrWrongLeader || reply.Err == ErrFail {
@@ -109,15 +109,15 @@ func (ck *Clerk) sendGet(args *GetArgs) GetReply {
 		}
 
 		args.Time = time.Now().UnixNano()
-		reply = GetReply{}
+		reply = &GetReply{}
 		ck.printf("send %v(%v) to %v", args, reply, leader)
 
-		ok = ck.send(leader, "KVServer.Get", args, &reply)
+		ok = ck.send(leader, "KVServer.Get", args, reply)
 		ck.printf("received: %v : %v from %v", args, reply, leader)
 	}
 
 	ck.setCurLeader(leader)
-	return reply
+	return *reply
 }
 
 func (ck *Clerk) get(args *GetArgs) string {
@@ -165,12 +165,12 @@ func (ck *Clerk) Get(key string) string {
 }
 
 func (ck *Clerk) sendPutAppend(args *PutAppendArgs) PutAppendReply {
-	reply := PutAppendReply{}
+	reply := &PutAppendReply{}
 	leader := ck.getCurLeader()
 	waitTime := expFallbackWaitTime
 
 	ck.printf("send %v(%v) to %v", args, reply, leader)
-	ok := ck.send(leader, "KVServer.PutAppend", args, &reply)
+	ok := ck.send(leader, "KVServer.PutAppend", args, reply)
 	ck.printf("received: %v : %v from %v", args, reply, leader)
 
 	for !ok || reply.Err == ErrWrongLeader || reply.Err == ErrFail {
@@ -188,15 +188,15 @@ func (ck *Clerk) sendPutAppend(args *PutAppendArgs) PutAppendReply {
 		}
 
 		args.Time = time.Now().UnixNano()
-		reply = PutAppendReply{}
+		reply = &PutAppendReply{}
 		ck.printf("send %v(%v) to %v", args, reply, leader)
 
-		ok = ck.send(leader, "KVServer.PutAppend", args, &reply)
+		ok = ck.send(leader, "KVServer.PutAppend", args, reply)
 		ck.printf("received: %v : %v from %v", args, reply, leader)
 	}
 
 	ck.setCurLeader(leader)
-	return reply
+	return *reply
 }
 
 func (ck *Clerk) putAppend(args *PutAppendArgs) {
