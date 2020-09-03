@@ -46,6 +46,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 }
 
 type entryType int
@@ -825,6 +826,7 @@ func (rf *Raft) getCommitedEntriesToApply() []ApplyMsg {
 			Command:      rf.logs[i].Command,
 			CommandValid: rf.logs[i].Type == stateMachineCmdEntry,
 			CommandIndex: rf.logs[i].CommandIndex,
+			CommandTerm:  rf.logs[i].Term,
 		})
 	}
 
