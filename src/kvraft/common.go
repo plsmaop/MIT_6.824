@@ -37,6 +37,8 @@ type Reply interface {
 	GetSeqNum() int64
 	GetTimestamp() int64
 	GetValue() string
+	SetClientID(string)
+	SetSeqNum(int64)
 	SetErr(Err)
 	SetValue(string)
 	SetTime(int64)
@@ -105,6 +107,14 @@ func (par *PutAppendReply) GetValue() string {
 
 func (par *PutAppendReply) GetTimestamp() int64 {
 	return par.Time
+}
+
+func (par *PutAppendReply) SetClientID(cID string) {
+	par.ClientID = cID
+}
+
+func (par *PutAppendReply) SetSeqNum(seqNum int64) {
+	par.SeqNum = seqNum
 }
 
 func (par *PutAppendReply) SetErr(e Err) {
@@ -178,6 +188,14 @@ func (gr *GetReply) GetValue() string {
 
 func (gr *GetReply) GetTimestamp() int64 {
 	return gr.Time
+}
+
+func (gr *GetReply) SetClientID(cID string) {
+	gr.ClientID = cID
+}
+
+func (gr *GetReply) SetSeqNum(seqNum int64) {
+	gr.SeqNum = seqNum
 }
 
 func (gr *GetReply) SetErr(e Err) {
