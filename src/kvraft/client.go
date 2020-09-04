@@ -13,7 +13,10 @@ import (
 )
 
 const (
-	reqTimeout = 2 * time.Second
+	reqTimeout       = 2 * time.Second
+	receiver         = "KVServer"
+	getRPCName       = receiver + ".Get"
+	putAppendRPCName = receiver + ".PutAppend"
 )
 
 type Clerk struct {
@@ -85,13 +88,13 @@ func (ck *Clerk) send(leader int64, rpcName string, args Args, reply Reply) bool
 	}
 }
 
-func (ck *Clerk) sendGet(args GetArgs) GetReply {
+func (ck *Clerk) sendGet(args *GetArgs) GetReply {
 	reply := &GetReply{}
 	leader := ck.getCurLeader()
 	waitTime := expFallbackWaitTime
 
 	ck.printf("send %v(%v) to %v", args, reply, leader)
-	ok := ck.send(leader, "KVServer.Get", args, reply)
+	ok := ck.send(leader, getRPCName, args, reply)
 	ck.printf("received: %v : %v from %v", args, reply, leader)
 
 	for !ok || reply.Err == ErrWrongLeader || reply.Err == ErrFail {
@@ -103,7 +106,7 @@ func (ck *Clerk) sendGet(args GetArgs) GetReply {
 		leader = (leader + 1) % int64(len(ck.servers))
 		reply = &GetReply{}
 		ck.printf("send %v(%v) to %v", args, reply, leader)
-		ok = ck.send(leader, "KVServer.Get", args, reply)
+		ok = ck.send(leader, getRPCName, args, reply)
 		ck.printf("received: %v : %v from %v", args, reply, leader)
 	}
 
@@ -111,7 +114,7 @@ func (ck *Clerk) sendGet(args GetArgs) GetReply {
 	return *reply
 }
 
-func (ck *Clerk) get(args GetArgs) string {
+func (ck *Clerk) get(args *GetArgs) string {
 	reply := ck.sendGet(args)
 
 	switch reply.Err {
@@ -152,7 +155,7 @@ func (ck *Clerk) Get(key string) string {
 	}
 
 	ck.printf("ck get: %v", args)
-	return ck.get(args)
+	return ck.get(&args)
 }
 
 func (ck *Clerk) sendPutAppend(args *PutAppendArgs) PutAppendReply {
@@ -161,7 +164,7 @@ func (ck *Clerk) sendPutAppend(args *PutAppendArgs) PutAppendReply {
 	waitTime := expFallbackWaitTime
 
 	ck.printf("send %v(%v) to %v", args, reply, leader)
-	ok := ck.send(leader, "KVServer.PutAppend", args, reply)
+	ok := ck.send(leader, putAppendRPCName, args, reply)
 	ck.printf("received: %v : %v from %v", args, reply, leader)
 
 	for !ok || reply.Err == ErrWrongLeader || reply.Err == ErrFail {
@@ -173,7 +176,7 @@ func (ck *Clerk) sendPutAppend(args *PutAppendArgs) PutAppendReply {
 		leader = (leader + 1) % int64(len(ck.servers))
 		reply = &PutAppendReply{}
 		ck.printf("send %v(%v) to %v", args, reply, leader)
-		ok = ck.send(leader, "KVServer.PutAppend", args, reply)
+		ok = ck.send(leader, putAppendRPCName, args, reply)
 		ck.printf("received: %v : %v from %v", args, reply, leader)
 	}
 
