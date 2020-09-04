@@ -90,23 +90,14 @@ type KVServer struct {
 	jobTable    KVStore
 	clientTable map[string]*client
 	appliedInd  int64
-	appliedTerm int
+	appliedTerm int64
 }
-
-type reqStatus string
-
-const (
-	working   reqStatus = "working"
-	successed reqStatus = "successed"
-	failed    reqStatus = "failed"
-)
 
 type client struct {
 	clientID          string
 	seqNum            int64
 	appliedInd        int
 	appliedTerm       int
-	reqStatus         reqStatus
 	lastExecutedValue string
 }
 
@@ -124,6 +115,14 @@ func (kv *KVServer) getAppliedInd() int64 {
 	return atomic.LoadInt64(&kv.appliedInd)
 }
 
+func (kv *KVServer) updateAppliedTerm(term int64) {
+	atomic.StoreInt64(&kv.appliedTerm, term)
+}
+
+func (kv *KVServer) getAppliedTerm() int64 {
+	return atomic.LoadInt64(&kv.appliedTerm)
+}
+
 func (kv *KVServer) setClient(c *client) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
@@ -137,7 +136,6 @@ func (kv *KVServer) setClient(c *client) {
 	client.seqNum = c.seqNum
 	client.appliedInd = c.appliedInd
 	client.appliedTerm = c.appliedTerm
-	client.reqStatus = c.reqStatus
 	client.lastExecutedValue = c.lastExecutedValue
 }
 
@@ -167,18 +165,12 @@ func (kv *KVServer) startRequest(args Args, reply Reply) (raftLogInd int, succes
 		}
 
 		if c.seqNum == seqNum {
-			switch c.reqStatus {
-			case successed:
-				// successs request
-				reply.SetErr(OK)
-				reply.SetTime(time.Now().UnixNano())
-				reply.SetValue(c.lastExecutedValue)
-				kv.printf("Handled req: %v, reply", args, c.lastExecutedValue)
-				return -1, false
-			case failed:
-				// submit another request
-				kv.printf("Failed req: %v, reply", args, c.lastExecutedValue)
-			}
+			// successs request
+			reply.SetErr(OK)
+			reply.SetTime(time.Now().UnixNano())
+			reply.SetValue(c.lastExecutedValue)
+			kv.printf("Handled req: %v, reply", args, c.lastExecutedValue)
+			return -1, false
 		}
 	}
 
@@ -289,10 +281,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) apply(msg raft.ApplyMsg) {
 	// update applied term
 	defer func() {
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
-		if msg.CommandTerm > kv.appliedTerm {
-			kv.appliedTerm = msg.CommandTerm
+		appliedTerm := kv.getAppliedTerm()
+		if int64(msg.CommandTerm) > appliedTerm {
+			kv.updateAppliedTerm(int64(msg.CommandTerm))
 		}
 	}()
 
@@ -331,7 +322,6 @@ func (kv *KVServer) apply(msg raft.ApplyMsg) {
 		seqNum:            cmd.SeqNum,
 		appliedInd:        msg.CommandIndex,
 		appliedTerm:       msg.CommandTerm,
-		reqStatus:         successed,
 		lastExecutedValue: s,
 	})
 
@@ -354,11 +344,6 @@ func (kv *KVServer) apply(msg raft.ApplyMsg) {
 
 func (kv *KVServer) cleanUpSatleReq() {
 	appliedInd := kv.getAppliedInd()
-	cleanUpOp := Op{
-		Type:     cleanUpOp,
-		ClientID: "",
-		SeqNum:   -1,
-	}
 	for ind := int64(1); ind < appliedInd; ind++ {
 		cmdInd := fmt.Sprintf("%v", ind)
 		entry, ok := kv.jobTable.Get(cmdInd)
@@ -368,7 +353,6 @@ func (kv *KVServer) cleanUpSatleReq() {
 
 		jobs, _ := entry.([]job)
 		for _, job := range jobs {
-			job.done <- cleanUpOp
 			close(job.done)
 		}
 

@@ -74,6 +74,7 @@ func (ck *Clerk) send(leader int64, rpcName string, args Args, reply Reply) bool
 	doneChan := make(chan bool)
 	go func() {
 		doneChan <- ck.servers[leader].Call(rpcName, args, reply)
+		close(doneChan)
 	}()
 
 	select {
@@ -94,24 +95,15 @@ func (ck *Clerk) sendGet(args *GetArgs) GetReply {
 	ck.printf("received: %v : %v from %v", args, reply, leader)
 
 	for !ok || reply.Err == ErrWrongLeader || reply.Err == ErrFail {
-
 		if !ok {
 			time.Sleep(waitTime * time.Nanosecond)
 			waitTime *= waitTime
 		}
 
-		if reply.Err == ErrFail {
-			ck.printf("failed : %v", args)
-		}
-
-		if reply.Err != ErrFail {
-			leader = (leader + 1) % int64(len(ck.servers))
-		}
-
+		leader = (leader + 1) % int64(len(ck.servers))
 		args.Time = time.Now().UnixNano()
 		reply = &GetReply{}
 		ck.printf("send %v(%v) to %v", args, reply, leader)
-
 		ok = ck.send(leader, "KVServer.Get", args, reply)
 		ck.printf("received: %v : %v from %v", args, reply, leader)
 	}
@@ -179,18 +171,10 @@ func (ck *Clerk) sendPutAppend(args *PutAppendArgs) PutAppendReply {
 			waitTime *= waitTime
 		}
 
-		if reply.Err == ErrFail {
-			ck.printf("failed : %v", args)
-		}
-
-		if reply.Err != ErrFail {
-			leader = (leader + 1) % int64(len(ck.servers))
-		}
-
+		leader = (leader + 1) % int64(len(ck.servers))
 		args.Time = time.Now().UnixNano()
 		reply = &PutAppendReply{}
 		ck.printf("send %v(%v) to %v", args, reply, leader)
-
 		ok = ck.send(leader, "KVServer.PutAppend", args, reply)
 		ck.printf("received: %v : %v from %v", args, reply, leader)
 	}
