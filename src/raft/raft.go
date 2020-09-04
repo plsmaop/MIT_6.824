@@ -181,6 +181,17 @@ func (rf *Raft) updateTerm(term int) {
 }
 
 //
+// helper function
+// must be used in cirtical section
+//
+func (rf *Raft) getLogsByRange(start, end int) []entry {
+	returnLogs := make([]entry, end-start)
+	copy(returnLogs, rf.logs[start:end])
+
+	return returnLogs
+}
+
+//
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
@@ -371,7 +382,7 @@ func (rf *Raft) getAppendEntriesTaskArgs(now time.Time) (bool, []appendEntriesTa
 		prevLogTerm := rf.getPrevLogTerm(nextInd)
 		entries := []entry{}
 		if nextInd > 0 && nextInd <= len(rf.logs) {
-			entries = rf.logs[nextInd-1:]
+			entries = rf.getLogsByRange(nextInd-1, len(rf.logs))
 		}
 		appendEntriesTaskArgsToSend = append(appendEntriesTaskArgsToSend, appendEntriesTaskArgs{
 			peerInd: ind,
@@ -508,7 +519,7 @@ func (rf *Raft) handleRequestVoteResponse(peerInd int, args *RequestVoteArgs, re
 				LeaderID:          rf.me,
 				PrevLogIndex:      nextInd - 1,
 				PrevLogTerm:       prevLogTerm,
-				Entries:           rf.logs[nextInd-1:],
+				Entries:           rf.getLogsByRange(nextInd-1, len(rf.logs)),
 				LeaderCommitIndex: rf.commitIndex,
 			},
 		})
@@ -594,7 +605,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else if len(args.Entries) > 0 {
 			if len(rf.logs) >= nextIndex && rf.logs[nextIndex-1].Term != args.Entries[0].Term {
 				// conflict, drop conflicted logs
-				rf.logs = rf.logs[:nextIndex-1]
+				rf.logs = rf.getLogsByRange(0, nextIndex-1)
 			}
 
 			if len(rf.logs) == args.PrevLogIndex {
@@ -659,11 +670,11 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 				LeaderID:          rf.me,
 				PrevLogIndex:      nextInd - 1,
 				PrevLogTerm:       prevLogTerm,
-				Entries:           rf.logs[nextInd-1:],
+				Entries:           rf.getLogsByRange(nextInd-1, len(rf.logs)),
 				LeaderCommitIndex: rf.commitIndex,
 			},
 		}
-		rf.printf("%d leader retry to %d %v leader log: %v", rf.me, peerInd, rf.logs[nextInd-1:], rf.logs)
+		rf.printf("%d leader retry to %d %v leader log: %v", rf.me, peerInd, rf.getLogsByRange(nextInd-1, len(rf.logs)), rf.logs)
 	}
 	rf.mu.Unlock()
 
