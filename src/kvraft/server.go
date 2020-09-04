@@ -229,11 +229,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}))
 
 	opDone := <-done
-	if opDone.Type == cleanUpOp {
-		log.Printf("clean Up: %v", args)
-		return
-	}
-
 	reply.Time = time.Now().UnixNano()
 	if opDone.Type != opType || opDone.ClientID != cID || opDone.SeqNum != seqNum {
 		reply.SetErr(ErrFail)
@@ -281,11 +276,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}))
 
 	opDone := <-done
-	if opDone.Type == cleanUpOp {
-		log.Printf("clean Up: %v", args)
-		return
-	}
-
 	reply.Time = time.Now().UnixNano()
 	if opDone.Type != opType || opDone.ClientID != cID || opDone.SeqNum != seqNum {
 		reply.SetErr(ErrFail)
