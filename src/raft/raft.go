@@ -628,7 +628,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if argsEntryIndex < len(args.Entries) {
 			rf.printf("%d merge from: %v with %v", rf.me, rf, args)
 			entriesToAppend := args.Entries[argsEntryIndex:]
-			rf.logs = rf.getLogsByRange(0, nextIndex-1)
+			rf.logs = rf.logs[:nextIndex-1]
 			rf.appendLogs(entriesToAppend...)
 			rf.printf("%d done, merge from: %v with %v", rf.me, rf, entriesToAppend)
 		}
@@ -681,6 +681,7 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 		shouldRetry = true
 		nextInd = rf.nextIndex[peerInd]
 		prevLogTerm := rf.getPrevLogTerm(nextInd)
+		entries := rf.getLogsByRange(nextInd-1, len(rf.logs))
 		appendEntriesTaskArgsToSend = appendEntriesTaskArgs{
 			peerInd: peerInd,
 			nextInd: nextInd,
@@ -689,11 +690,11 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 				LeaderID:          rf.me,
 				PrevLogIndex:      nextInd - 1,
 				PrevLogTerm:       prevLogTerm,
-				Entries:           rf.getLogsByRange(nextInd-1, len(rf.logs)),
+				Entries:           entries,
 				LeaderCommitIndex: rf.commitIndex,
 			},
 		}
-		rf.printf("%d leader retry to %d %v leader log: %v", rf.me, peerInd, rf.getLogsByRange(nextInd-1, len(rf.logs)), rf.logs)
+		rf.printf("%d leader retry to %d %v leader log: %v", rf.me, peerInd, entries, rf.logs)
 	}
 	rf.mu.Unlock()
 
@@ -779,9 +780,7 @@ func (rf *Raft) getAppendEntriesTaskArgs(now time.Time) []appendEntriesTaskArgs 
 		nextInd := rf.nextIndex[ind]
 		prevLogTerm := rf.getPrevLogTerm(nextInd)
 		entries := []entry{}
-		if nextInd > 0 && nextInd <= len(rf.logs) {
-			entries = rf.getLogsByRange(nextInd-1, len(rf.logs))
-		}
+		entries = rf.getLogsByRange(nextInd-1, len(rf.logs))
 		appendEntriesTaskArgsToSend = append(appendEntriesTaskArgsToSend, appendEntriesTaskArgs{
 			peerInd: ind,
 			nextInd: rf.nextIndex[ind],
