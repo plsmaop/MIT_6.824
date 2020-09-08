@@ -23,6 +23,7 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 const (
 	raftTimeout = time.Minute
 	workerNum   = 10
+	noSuchKey   = "NoSuchKey"
 )
 
 type KVStore struct {
@@ -71,7 +72,7 @@ type Op struct {
 	// otherwise RPC will break.
 	Type     opType
 	Key      string
-	Value    interface{}
+	Value    string
 	ClientID string
 	SeqNum   int64
 }
@@ -86,7 +87,7 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	store       KVStore
+	store       map[string]string
 	jobTable    KVStore
 	clientTable map[string]*client
 	appliedInd  int64
@@ -166,9 +167,14 @@ func (kv *KVServer) startRequest(args Args, reply Reply) (raftLogInd int, succes
 
 		if c.seqNum == seqNum {
 			// successs request
-			reply.SetErr(OK)
 			reply.SetTime(time.Now().UnixNano())
-			reply.SetValue(c.lastExecutedValue)
+			if c.lastExecutedValue == noSuchKey {
+				reply.SetErr(ErrNoKey)
+				reply.SetValue("")
+			} else {
+				reply.SetErr(OK)
+				reply.SetValue(c.lastExecutedValue)
+			}
 			kv.printf("Handled req: %v, reply", args, c.lastExecutedValue)
 			return -1, false
 		}
@@ -226,10 +232,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.SetErr(ErrFail)
 		kv.printf("%v:%v failed", cID, seqNum)
 	} else {
-		if opDone.Value != nil {
+		if opDone.Value != noSuchKey {
 			reply.SetErr(OK)
-			v, _ := opDone.Value.(string)
-			reply.SetValue(v)
+			reply.SetValue(opDone.Value)
 		} else {
 			reply.SetErr(ErrNoKey)
 			reply.SetValue("")
@@ -306,27 +311,28 @@ func (kv *KVServer) apply(msg raft.ApplyMsg) {
 			if ok && c.seqNum == cmd.SeqNum {
 				cmd.Value = c.lastExecutedValue
 			} else {
-				v, _ := kv.store.Get(cmd.Key)
-				cmd.Value = v
+				if v, ok := kv.store[cmd.Key]; !ok {
+					cmd.Value = noSuchKey
+				} else {
+					cmd.Value = v
+				}
 			}
 		case putType:
-			kv.store.Put(cmd.Key, cmd.Value)
+			kv.store[cmd.Key] = cmd.Value
 		case appendType:
-			v, _ := cmd.Value.(string)
-			kv.store.AtomicOp(cmd.Key, kv.appendWrapper(v))
+			kv.store[cmd.Key] += cmd.Value
 		default:
 			log.Printf("Invalid cmd type: %v, discard\n", cmd.Type)
 			return
 		}
 	}
 
-	s, _ := cmd.Value.(string)
 	kv.setClient(&client{
 		clientID:          cmd.ClientID,
 		seqNum:            cmd.SeqNum,
 		appliedInd:        msg.CommandIndex,
 		appliedTerm:       msg.CommandTerm,
-		lastExecutedValue: s,
+		lastExecutedValue: cmd.Value,
 	})
 
 	cmdInd := fmt.Sprintf("%v", msg.CommandIndex)
@@ -490,9 +496,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		kvTable: make(map[string]interface{}),
 	}
 
-	kv.store = KVStore{
-		kvTable: make(map[string]interface{}),
-	}
+	kv.store = make(map[string]string)
 
 	kv.clientTable = make(map[string]*client)
 
