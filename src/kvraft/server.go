@@ -303,8 +303,12 @@ func (kv *KVServer) apply(msg raft.ApplyMsg) {
 	if !ok || c.seqNum < cmd.SeqNum || (c.seqNum == cmd.SeqNum && cmd.Type == getType) {
 		switch cmd.Type {
 		case getType:
-			v, _ := kv.store.Get(cmd.Key)
-			cmd.Value = v
+			if ok && c.seqNum == cmd.SeqNum {
+				cmd.Value = c.lastExecutedValue
+			} else {
+				v, _ := kv.store.Get(cmd.Key)
+				cmd.Value = v
+			}
 		case putType:
 			kv.store.Put(cmd.Key, cmd.Value)
 		case appendType:
