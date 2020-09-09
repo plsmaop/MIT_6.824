@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -66,6 +67,25 @@ func (kvs *KVStore) AtomicOp(k string, op func(interface{}) interface{}) bool {
 	return true
 }
 
+func (kvs *KVStore) Copy() map[string]interface{} {
+	kvs.mu.RLock()
+	defer kvs.mu.RUnlock()
+
+	copiedMap := map[string]interface{}{}
+	for k, v := range kvs.kvTable {
+		copiedMap[k] = v
+	}
+
+	return copiedMap
+}
+
+func (kvs *KVStore) Replace(newData map[string]interface{}) {
+	kvs.mu.Lock()
+	defer kvs.mu.Unlock()
+
+	kvs.kvTable = newData
+}
+
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
@@ -87,19 +107,22 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	store       map[string]string
-	jobTable    KVStore
+	store    map[string]string
+	jobTable KVStore
+
 	clientTable map[string]*client
+	ctMu        sync.RWMutex
+
 	appliedInd  int64
 	appliedTerm int64
 }
 
 type client struct {
-	clientID          string
-	seqNum            int64
-	appliedInd        int
-	appliedTerm       int
-	lastExecutedValue string
+	ClientID          string
+	SeqNum            int64
+	AppliedInd        int
+	AppliedTerm       int
+	LastExecutedValue string
 }
 
 type job struct {
@@ -125,24 +148,24 @@ func (kv *KVServer) getAppliedTerm() int64 {
 }
 
 func (kv *KVServer) setClient(c *client) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
+	kv.ctMu.Lock()
+	defer kv.ctMu.Unlock()
 
-	client, ok := kv.clientTable[c.clientID]
+	client, ok := kv.clientTable[c.ClientID]
 	if !ok {
-		kv.clientTable[c.clientID] = c
+		kv.clientTable[c.ClientID] = c
 		return
 	}
 
-	client.seqNum = c.seqNum
-	client.appliedInd = c.appliedInd
-	client.appliedTerm = c.appliedTerm
-	client.lastExecutedValue = c.lastExecutedValue
+	client.SeqNum = c.SeqNum
+	client.AppliedInd = c.AppliedInd
+	client.AppliedTerm = c.AppliedTerm
+	client.LastExecutedValue = c.LastExecutedValue
 }
 
 func (kv *KVServer) getClient(cID string) (client, bool) {
-	kv.mu.RLock()
-	defer kv.mu.RUnlock()
+	kv.ctMu.RLock()
+	defer kv.ctMu.RUnlock()
 
 	c, ok := kv.clientTable[cID]
 	if ok {
@@ -152,25 +175,47 @@ func (kv *KVServer) getClient(cID string) (client, bool) {
 	return client{}, false
 }
 
+func (kv *KVServer) copyClientTable() map[string]client {
+	kv.ctMu.RLock()
+	defer kv.ctMu.RUnlock()
+
+	copiedClientTable := map[string]client{}
+	for k, v := range kv.clientTable {
+		c := *v
+		copiedClientTable[k] = c
+	}
+
+	return copiedClientTable
+}
+
+func (kv *KVServer) installClientTable(ct map[string]client) {
+	kv.ctMu.Lock()
+	defer kv.ctMu.Unlock()
+
+	for k, v := range ct {
+		kv.clientTable[k] = &v
+	}
+}
+
 func (kv *KVServer) startRequest(args Args, reply Reply) (raftLogInd int, success bool) {
 	cID := args.GetClientID()
 	seqNum := args.GetSeqNum()
 
 	c, ok := kv.getClient(cID)
 	if ok {
-		if c.seqNum > seqNum {
+		if c.SeqNum > seqNum {
 			// stale request
 			// discard
 			kv.printf("Stale req: %v", args)
 			return -1, false
 		}
 
-		if c.seqNum == seqNum {
+		if c.SeqNum == seqNum {
 			// successs request
 			reply.SetTime(time.Now().UnixNano())
 
 			e := OK
-			v := c.lastExecutedValue
+			v := c.LastExecutedValue
 			if v == noSuchKey {
 				e = ErrNoKey
 				v = ""
@@ -179,7 +224,7 @@ func (kv *KVServer) startRequest(args Args, reply Reply) (raftLogInd int, succes
 			reply.SetErr(e)
 			reply.SetValue(v)
 
-			kv.printf("Handled req: %v, reply", args, c.lastExecutedValue)
+			kv.printf("Handled req: %v, reply", args, c.LastExecutedValue)
 			return -1, false
 		}
 	}
@@ -292,32 +337,18 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *KVServer) apply(msg raft.ApplyMsg) {
-	// update applied term
-	defer func() {
-		appliedTerm := kv.getAppliedTerm()
-		if int64(msg.CommandTerm) > appliedTerm {
-			kv.updateAppliedTerm(int64(msg.CommandTerm))
-		}
-	}()
-
-	if !msg.CommandValid {
-		return
-	}
-
 	cmd, ok := msg.Command.(Op)
 	if !ok {
 		log.Printf("Invalid cmd: %v, discard\n", msg.Command)
 		return
 	}
 
-	defer kv.updateAppliedInd(int64(msg.CommandIndex))
-
 	c, ok := kv.getClient(cmd.ClientID)
-	if !ok || c.seqNum < cmd.SeqNum || (c.seqNum == cmd.SeqNum && cmd.Type == getType) {
+	if !ok || c.SeqNum < cmd.SeqNum || (c.SeqNum == cmd.SeqNum && cmd.Type == getType) {
 		switch cmd.Type {
 		case getType:
-			if ok && c.seqNum == cmd.SeqNum {
-				cmd.Value = c.lastExecutedValue
+			if ok && c.SeqNum == cmd.SeqNum {
+				cmd.Value = c.LastExecutedValue
 				break
 			}
 
@@ -337,11 +368,11 @@ func (kv *KVServer) apply(msg raft.ApplyMsg) {
 	}
 
 	kv.setClient(&client{
-		clientID:          cmd.ClientID,
-		seqNum:            cmd.SeqNum,
-		appliedInd:        msg.CommandIndex,
-		appliedTerm:       msg.CommandTerm,
-		lastExecutedValue: cmd.Value,
+		ClientID:          cmd.ClientID,
+		SeqNum:            cmd.SeqNum,
+		AppliedInd:        msg.CommandIndex,
+		AppliedTerm:       msg.CommandTerm,
+		LastExecutedValue: cmd.Value,
 	})
 
 	cmdInd := fmt.Sprintf("%v", msg.CommandIndex)
@@ -359,24 +390,6 @@ func (kv *KVServer) apply(msg raft.ApplyMsg) {
 	}
 
 	kv.jobTable.Delete(cmdInd)
-}
-
-func (kv *KVServer) cleanUpSatleReq() {
-	appliedInd := kv.getAppliedInd()
-	for ind := int64(1); ind < appliedInd; ind++ {
-		cmdInd := fmt.Sprintf("%v", ind)
-		entry, ok := kv.jobTable.Get(cmdInd)
-		if !ok {
-			continue
-		}
-
-		jobs, _ := entry.([]job)
-		for _, job := range jobs {
-			close(job.done)
-		}
-
-		kv.jobTable.Delete(cmdInd)
-	}
 }
 
 func (kv *KVServer) appendJobWrapper(j job) func(interface{}) interface{} {
@@ -400,6 +413,80 @@ func (kv *KVServer) appendWrapper(s string) func(interface{}) interface{} {
 
 		kv.printf("FFF: %v", val+s)
 		return val + s
+	}
+}
+
+func (kv *KVServer) cleanUpSatleReq() {
+	appliedInd := kv.getAppliedInd()
+	for ind := int64(1); ind < appliedInd; ind++ {
+		cmdInd := fmt.Sprintf("%v", ind)
+		entry, ok := kv.jobTable.Get(cmdInd)
+		if !ok {
+			continue
+		}
+
+		jobs, _ := entry.([]job)
+		for _, job := range jobs {
+			close(job.done)
+		}
+
+		kv.jobTable.Delete(cmdInd)
+	}
+}
+
+func (kv *KVServer) snapshot(index, term int) {
+	if kv.maxraftstate == -1 || kv.maxraftstate > kv.rf.GetPersistentSize() {
+		return
+	}
+
+	clientTable := kv.copyClientTable()
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	e.Encode(kv.store)
+	e.Encode(clientTable)
+	data := w.Bytes()
+	kv.rf.Snapshot(data, index, term)
+}
+
+func (kv *KVServer) restoreStateFromSnapshot(msg raft.ApplyMsg) {
+	snapshot, ok := msg.Command.([]byte)
+	if !ok {
+		log.Fatalf("%v failed to restore from snapshot", kv.me)
+	}
+
+	if snapshot == nil || len(snapshot) < 1 {
+		return
+	}
+
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+
+	var kvstore map[string]string
+	var clientTable map[string]client
+
+	if d.Decode(&kvstore) != nil || d.Decode(&clientTable) != nil {
+		log.Fatalf("%d restore failed", kv.me)
+	}
+
+	kv.store = kvstore
+	kv.installClientTable(clientTable)
+	kv.updateAppliedTerm(int64(msg.CommandTerm))
+}
+
+func (kv *KVServer) processApplyMsg(msg raft.ApplyMsg) {
+	switch msg.Type {
+	case raft.StateMachineCmdEntry:
+		kv.apply(msg)
+		kv.updateAppliedInd(int64(msg.CommandIndex))
+		if int64(msg.CommandTerm) > kv.getAppliedTerm() {
+			kv.updateAppliedTerm(int64(msg.CommandTerm))
+		}
+		kv.snapshot(msg.IndexInLog, msg.CommandTerm)
+	case raft.SnapshotEntry:
+		kv.restoreStateFromSnapshot(msg)
+	case raft.TermEntry:
+		break
 	}
 }
 
@@ -434,12 +521,8 @@ func (kv *KVServer) startLoop() {
 			case <-ctx.Done():
 				return
 			case applyMsg := <-kv.applyCh:
-				if !applyMsg.CommandValid {
-					continue
-				}
-
 				kv.printf("applyMsg: %v", applyMsg)
-				kv.apply(applyMsg)
+				kv.processApplyMsg(applyMsg)
 			}
 		}
 	}()
@@ -493,21 +576,19 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
 
-	kv := new(KVServer)
-	kv.me = me
-	kv.maxraftstate = maxraftstate
+	applyCh := make(chan raft.ApplyMsg)
+	kv := &KVServer{
+		me:           me,
+		maxraftstate: maxraftstate,
+		applyCh:      applyCh,
+		rf:           raft.Make(servers, me, persister, applyCh),
 
-	// You may need initialization code here.
-
-	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	kv.jobTable = KVStore{
-		kvTable: make(map[string]interface{}),
+		jobTable: KVStore{
+			kvTable: make(map[string]interface{}),
+		},
+		store:       make(map[string]string),
+		clientTable: make(map[string]*client),
 	}
-
-	kv.store = make(map[string]string)
-
-	kv.clientTable = make(map[string]*client)
 
 	// You may need initialization code here.
 	kv.startLoop()

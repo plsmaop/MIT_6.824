@@ -43,18 +43,20 @@ import (
 // ApplyMsg, but set CommandValid to false for these other uses.
 //
 type ApplyMsg struct {
+	Type         entryType
 	CommandValid bool
-	Command      interface{}
 	CommandIndex int
 	CommandTerm  int
+	IndexInLog   int
+	Command      interface{}
 }
 
 type entryType int
 
 const (
-	stateMachineCmdEntry entryType = iota
-	termEntry
-	snapshotEntry
+	StateMachineCmdEntry entryType = iota
+	TermEntry
+	SnapshotEntry
 )
 
 //
@@ -63,6 +65,7 @@ const (
 type entry struct {
 	Type         entryType
 	CommandIndex int
+	IndexInLog   int
 	Term         int
 	Command      interface{}
 }
@@ -80,7 +83,7 @@ const (
 
 const (
 	electionTimeoutPeriodBase = int64(time.Millisecond * 300)
-	randMax                   = 300
+	randMax                   = 500
 	randMin                   = 100
 	period                    = 100
 )
@@ -95,10 +98,10 @@ func (rf *Raft) newTimeout() int64 {
 }
 
 //
-// A Go object implementing a single Raft peer.
+// Raft is a Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	mu        sync.RWMutex        // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -128,6 +131,10 @@ type Raft struct {
 	// handle append entry
 	appendChan    chan appendEntriesTaskArgs
 	currentLeader int
+
+	// for snapshot
+	lastIncludedIndex int
+	lastIncludedTerm  int
 }
 
 //
@@ -169,9 +176,10 @@ func (rf *Raft) becomeLeader() {
 	// term entry, to ensure previous logs are commited
 	rf.appendLogs(entry{
 		CommandIndex: -1,
+		IndexInLog:   len(rf.logs) + 1,
 		Command:      nil,
 		Term:         rf.currentTerm,
-		Type:         termEntry,
+		Type:         TermEntry,
 	})
 
 	rf.printf("%d become leader", rf.me)
@@ -200,7 +208,7 @@ func (rf *Raft) updateTerm(term int) {
 func (rf *Raft) getNextCmdIndex() int {
 	lastCmdInd := 0
 	for i := len(rf.logs) - 1; i >= 0; i-- {
-		if rf.logs[i].Type == stateMachineCmdEntry {
+		if rf.logs[i].Type == StateMachineCmdEntry {
 			lastCmdInd = rf.logs[i].CommandIndex
 			break
 		}
@@ -269,6 +277,21 @@ func (rf *Raft) updateVotedForAndCurrentTerm(newVotedFor, newTerm int) {
 }
 
 //
+// helper function
+// must be used in critical section
+//
+func (rf *Raft) logToBtye() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
+	e.Encode(rf.logs)
+	return w.Bytes()
+}
+
+//
 // for debug
 //
 func (rf *Raft) printf(format string, a ...interface{}) {
@@ -282,8 +305,8 @@ func (rf *Raft) printf(format string, a ...interface{}) {
 //
 func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
 	return rf.currentTerm, rf.state == leader
 }
 
@@ -292,8 +315,8 @@ func (rf *Raft) GetState() (int, bool) {
 // if no leader, return -1
 //
 func (rf *Raft) GetCurrentLeader() int {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
 
 	return rf.currentLeader
 }
@@ -313,13 +336,8 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.logs)
-	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+
+	rf.persister.SaveRaftState(rf.logToBtye())
 }
 
 //
@@ -348,23 +366,59 @@ func (rf *Raft) readPersist(data []byte) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 
-	var currentTerm, votedFor int
+	var currentTerm, votedFor, lastIncludedIndex, lastIncludedTerm int
 	var logs []entry
-	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&lastIncludedTerm) != nil ||
+		d.Decode(&logs) != nil {
 		log.Fatalf("%d restore failed", rf.me)
 		return
 	}
 
 	rf.currentTerm = currentTerm
 	rf.votedFor = votedFor
+	rf.lastIncludedIndex = lastIncludedIndex
+	rf.lastIncludedTerm = lastIncludedTerm
 	rf.logs = logs
 	selfMatchIndex := len(rf.logs)
 	rf.matchIndex[rf.me] = selfMatchIndex
 	rf.nextIndex[rf.me] = selfMatchIndex + 1
+
+	// notify application to restore from snapshot
+	snapshot := rf.persister.ReadSnapshot()
+	if snapshot == nil || len(snapshot) < 1 {
+		return
+	}
+
+	rf.applyCh <- ApplyMsg{
+		IndexInLog:   lastIncludedIndex,
+		CommandIndex: -1,
+		CommandTerm:  lastIncludedTerm,
+		CommandValid: false,
+		Command:      snapshot,
+	}
+}
+
+func (rf *Raft) GetPersistentSize() int {
+	return rf.persister.RaftStateSize()
+}
+
+func (rf *Raft) Snapshot(snapshotData []byte, snapshotInd, snapshotTerm int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	rf.lastIncludedIndex = snapshotInd
+	rf.lastIncludedTerm = snapshotTerm
+	rf.logs = rf.logs[snapshotInd-1:]
+	state := rf.logToBtye()
+
+	rf.persister.SaveStateAndSnapshot(state, snapshotData)
 }
 
 //
-// RequestVote RPC arguments structure.
+// RequestVoteArgs is RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
@@ -376,7 +430,7 @@ type RequestVoteArgs struct {
 }
 
 //
-// RequestVote RPC reply structure.
+// RequestVoteReply is RequestVote RPC reply structure.
 // field names must start with capital letters!
 //
 type RequestVoteReply struct {
@@ -811,8 +865,10 @@ func (rf *Raft) getCommitedEntriesToApply() []ApplyMsg {
 
 	for i := rf.lastApplied; i < commitIndex; i++ {
 		entriesToApply = append(entriesToApply, ApplyMsg{
+			Type:         rf.logs[i].Type,
+			IndexInLog:   i + 1,
 			Command:      rf.logs[i].Command,
-			CommandValid: rf.logs[i].Type == stateMachineCmdEntry,
+			CommandValid: rf.logs[i].Type == StateMachineCmdEntry,
 			CommandIndex: rf.logs[i].CommandIndex,
 			CommandTerm:  rf.logs[i].Term,
 		})
@@ -924,8 +980,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.appendLogs(entry{
 		Term:         rf.currentTerm,
 		Command:      command,
+		IndexInLog:   len(rf.logs) + 1,
 		CommandIndex: cmdInd,
-		Type:         stateMachineCmdEntry,
+		Type:         StateMachineCmdEntry,
 	})
 
 	return cmdInd, term, true
