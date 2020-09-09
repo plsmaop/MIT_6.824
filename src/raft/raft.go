@@ -87,16 +87,11 @@ const (
 
 func (rf *Raft) newRandomNum() int64 {
 	randNum := (rand.Int63n(randMax-randMin) + randMin) * int64(time.Millisecond)
-	rf.electionTimeoutPeriod = randNum
 	return randNum
 }
 
 func (rf *Raft) newTimeout() int64 {
 	return time.Now().UnixNano() + electionTimeoutPeriodBase + rf.newRandomNum()
-}
-
-func (rf *Raft) isHeartbeatTimeout(now time.Time) bool {
-	return now.After(time.Unix(0, rf.electionTimeout-((9*rf.electionTimeoutPeriod)/10)))
 }
 
 //
@@ -127,9 +122,8 @@ type Raft struct {
 	matchIndex []int
 
 	// for election
-	receivedVote          int
-	electionTimeout       int64
-	electionTimeoutPeriod int64
+	receivedVote    int
+	electionTimeout int64
 
 	// handle append entry
 	appendChan    chan appendEntriesTaskArgs
@@ -659,8 +653,6 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 		return
 	}
 
-	shouldRetry := false
-	appendEntriesTaskArgsToSend := appendEntriesTaskArgs{}
 	if reply.Success {
 		newMatchIndex := args.PrevLogIndex + len(args.Entries)
 		if newMatchIndex > rf.matchIndex[peerInd] {
@@ -668,38 +660,37 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 			rf.nextIndex[peerInd] = newMatchIndex + 1
 			rf.matchIndex[peerInd] = newMatchIndex
 		}
-	} else {
-		nextIndex := reply.FirstIndexOfFailTerm
-		if nextIndex < 1 {
-			nextIndex = 1
-		}
-		rf.nextIndex[peerInd] = nextIndex
 
-		rf.matchIndex[peerInd] = rf.nextIndex[peerInd] - 1
-
-		// retry
-		shouldRetry = true
-		prevLogTerm := rf.getPrevLogTerm(nextIndex)
-		entries := rf.getLogsByRange(nextIndex-1, len(rf.logs))
-		appendEntriesTaskArgsToSend = appendEntriesTaskArgs{
-			peerInd: peerInd,
-			nextInd: nextIndex,
-			args: AppendEntriesArgs{
-				Term:              rf.currentTerm,
-				LeaderID:          rf.me,
-				PrevLogIndex:      nextIndex - 1,
-				PrevLogTerm:       prevLogTerm,
-				Entries:           entries,
-				LeaderCommitIndex: rf.commitIndex,
-			},
-		}
-		rf.printf("%d leader retry to %d %v leader log: %v", rf.me, peerInd, entries, rf.logs)
+		rf.mu.Unlock()
+		return
 	}
+
+	nextIndex := reply.FirstIndexOfFailTerm
+	if nextIndex < 1 {
+		nextIndex = 1
+	}
+
+	rf.nextIndex[peerInd] = nextIndex
+	rf.matchIndex[peerInd] = nextIndex - 1
+
+	prevLogTerm := rf.getPrevLogTerm(nextIndex)
+	entries := rf.getLogsByRange(nextIndex-1, len(rf.logs))
+	appendEntriesTaskArgsToSend := appendEntriesTaskArgs{
+		peerInd: peerInd,
+		nextInd: nextIndex,
+		args: AppendEntriesArgs{
+			Term:              rf.currentTerm,
+			LeaderID:          rf.me,
+			PrevLogIndex:      nextIndex - 1,
+			PrevLogTerm:       prevLogTerm,
+			Entries:           entries,
+			LeaderCommitIndex: rf.commitIndex,
+		},
+	}
+	rf.printf("%d leader retry to %d %v leader log: %v", rf.me, peerInd, entries, rf.logs)
 	rf.mu.Unlock()
 
-	if shouldRetry {
-		rf.appendChan <- appendEntriesTaskArgsToSend
-	}
+	rf.appendChan <- appendEntriesTaskArgsToSend
 }
 
 type appendEntriesTaskArgs struct {
@@ -778,8 +769,7 @@ func (rf *Raft) getAppendEntriesTaskArgs(now time.Time) []appendEntriesTaskArgs 
 
 		nextInd := rf.nextIndex[ind]
 		prevLogTerm := rf.getPrevLogTerm(nextInd)
-		entries := []entry{}
-		entries = rf.getLogsByRange(nextInd-1, len(rf.logs))
+		entries := rf.getLogsByRange(nextInd-1, len(rf.logs))
 		appendEntriesTaskArgsToSend = append(appendEntriesTaskArgsToSend, appendEntriesTaskArgs{
 			peerInd: ind,
 			nextInd: rf.nextIndex[ind],
