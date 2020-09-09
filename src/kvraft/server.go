@@ -168,13 +168,17 @@ func (kv *KVServer) startRequest(args Args, reply Reply) (raftLogInd int, succes
 		if c.seqNum == seqNum {
 			// successs request
 			reply.SetTime(time.Now().UnixNano())
-			if c.lastExecutedValue == noSuchKey {
-				reply.SetErr(ErrNoKey)
-				reply.SetValue("")
-			} else {
-				reply.SetErr(OK)
-				reply.SetValue(c.lastExecutedValue)
+
+			e := OK
+			v := c.lastExecutedValue
+			if v == noSuchKey {
+				e = ErrNoKey
+				v = ""
 			}
+
+			reply.SetErr(e)
+			reply.SetValue(v)
+
 			kv.printf("Handled req: %v, reply", args, c.lastExecutedValue)
 			return -1, false
 		}
@@ -231,17 +235,20 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	if opDone.Type != opType || opDone.ClientID != cID || opDone.SeqNum != seqNum {
 		reply.SetErr(ErrFail)
 		kv.printf("%v:%v failed", cID, seqNum)
-	} else {
-		if opDone.Value != noSuchKey {
-			reply.SetErr(OK)
-			reply.SetValue(opDone.Value)
-		} else {
-			reply.SetErr(ErrNoKey)
-			reply.SetValue("")
-		}
-
-		kv.printf("%v:%v finished", cID, seqNum)
+		return
 	}
+
+	e := OK
+	v := opDone.Value
+	if v == noSuchKey {
+		e = ErrNoKey
+		v = ""
+	}
+
+	reply.SetErr(e)
+	reply.SetValue(v)
+
+	kv.printf("%v:%v finished", cID, seqNum)
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -277,10 +284,11 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	if opDone.Type != opType || opDone.ClientID != cID || opDone.SeqNum != seqNum {
 		reply.SetErr(ErrFail)
 		kv.printf("%v:%v failed", cID, seqNum)
-	} else {
-		reply.SetErr(OK)
-		kv.printf("%v:%v finished", cID, seqNum)
+		return
 	}
+
+	reply.SetErr(OK)
+	kv.printf("%v:%v finished", cID, seqNum)
 }
 
 func (kv *KVServer) apply(msg raft.ApplyMsg) {
@@ -310,12 +318,13 @@ func (kv *KVServer) apply(msg raft.ApplyMsg) {
 		case getType:
 			if ok && c.seqNum == cmd.SeqNum {
 				cmd.Value = c.lastExecutedValue
+				break
+			}
+
+			if v, ok := kv.store[cmd.Key]; !ok {
+				cmd.Value = noSuchKey
 			} else {
-				if v, ok := kv.store[cmd.Key]; !ok {
-					cmd.Value = noSuchKey
-				} else {
-					cmd.Value = v
-				}
+				cmd.Value = v
 			}
 		case putType:
 			kv.store[cmd.Key] = cmd.Value

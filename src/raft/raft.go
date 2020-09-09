@@ -230,7 +230,9 @@ func (rf *Raft) checkLogUpTodate(args *RequestVoteArgs) bool {
 	if args.LastLogTerm > rf.logs[logLastIndex-1].Term {
 		// last log with latest term
 		return true
-	} else if args.LastLogTerm == rf.logs[logLastIndex-1].Term {
+	}
+
+	if args.LastLogTerm == rf.logs[logLastIndex-1].Term {
 		// same last term but longer log
 		return args.LastLogIndex >= logLastIndex
 	}
@@ -356,14 +358,15 @@ func (rf *Raft) readPersist(data []byte) {
 	var logs []entry
 	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
 		log.Fatalf("%d restore failed", rf.me)
-	} else {
-		rf.currentTerm = currentTerm
-		rf.votedFor = votedFor
-		rf.logs = logs
-		selfMatchIndex := len(rf.logs)
-		rf.matchIndex[rf.me] = selfMatchIndex
-		rf.nextIndex[rf.me] = selfMatchIndex + 1
+		return
 	}
+
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.logs = logs
+	selfMatchIndex := len(rf.logs)
+	rf.matchIndex[rf.me] = selfMatchIndex
+	rf.nextIndex[rf.me] = selfMatchIndex + 1
 }
 
 //
@@ -637,9 +640,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// update commit index
 	if args.LeaderCommitIndex > rf.commitIndex {
 		old := rf.commitIndex
-		if args.LeaderCommitIndex < len(rf.logs) {
-			rf.commitIndex = args.LeaderCommitIndex
-		} else {
+		rf.commitIndex = args.LeaderCommitIndex
+		if args.LeaderCommitIndex >= len(rf.logs) {
 			rf.commitIndex = len(rf.logs)
 		}
 
@@ -658,7 +660,6 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 	}
 
 	shouldRetry := false
-	nextInd := 0
 	appendEntriesTaskArgsToSend := appendEntriesTaskArgs{}
 	if reply.Success {
 		newMatchIndex := args.PrevLogIndex + len(args.Entries)
@@ -670,25 +671,23 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 	} else {
 		nextIndex := reply.FirstIndexOfFailTerm
 		if nextIndex < 1 {
-			rf.nextIndex[peerInd] = 1
-		} else {
-			rf.nextIndex[peerInd] = nextIndex
+			nextIndex = 1
 		}
+		rf.nextIndex[peerInd] = nextIndex
 
 		rf.matchIndex[peerInd] = rf.nextIndex[peerInd] - 1
 
 		// retry
 		shouldRetry = true
-		nextInd = rf.nextIndex[peerInd]
-		prevLogTerm := rf.getPrevLogTerm(nextInd)
-		entries := rf.getLogsByRange(nextInd-1, len(rf.logs))
+		prevLogTerm := rf.getPrevLogTerm(nextIndex)
+		entries := rf.getLogsByRange(nextIndex-1, len(rf.logs))
 		appendEntriesTaskArgsToSend = appendEntriesTaskArgs{
 			peerInd: peerInd,
-			nextInd: nextInd,
+			nextInd: nextIndex,
 			args: AppendEntriesArgs{
 				Term:              rf.currentTerm,
 				LeaderID:          rf.me,
-				PrevLogIndex:      nextInd - 1,
+				PrevLogIndex:      nextIndex - 1,
 				PrevLogTerm:       prevLogTerm,
 				Entries:           entries,
 				LeaderCommitIndex: rf.commitIndex,
