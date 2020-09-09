@@ -13,10 +13,11 @@ import (
 )
 
 const (
-	reqTimeout       = 2 * time.Second
-	receiver         = "KVServer"
-	getRPCName       = receiver + ".Get"
-	putAppendRPCName = receiver + ".PutAppend"
+	exBackoffWaitTime time.Duration = 2
+	reqTimeout                      = 2 * time.Second
+	receiver                        = "KVServer"
+	getRPCName                      = receiver + ".Get"
+	putAppendRPCName                = receiver + ".PutAppend"
 )
 
 type Clerk struct {
@@ -34,10 +35,6 @@ func nrand() int64 {
 	x := bigx.Int64()
 	return x
 }
-
-const (
-	expFallbackWaitTime time.Duration = 2
-)
 
 func (ck *Clerk) getSeqNum() int64 {
 	return atomic.AddInt64(&ck.seqNumber, 1)
@@ -91,7 +88,7 @@ func (ck *Clerk) send(leader int64, rpcName string, args Args, reply Reply) bool
 func (ck *Clerk) sendGet(args *GetArgs) GetReply {
 	reply := &GetReply{}
 	leader := ck.getCurLeader()
-	waitTime := expFallbackWaitTime
+	waitTime := exBackoffWaitTime
 
 	ck.printf("send %v(%v) to %v", args, reply, leader)
 	ok := ck.send(leader, getRPCName, args, reply)
@@ -161,7 +158,7 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) sendPutAppend(args *PutAppendArgs) PutAppendReply {
 	reply := &PutAppendReply{}
 	leader := ck.getCurLeader()
-	waitTime := expFallbackWaitTime
+	waitTime := exBackoffWaitTime
 
 	ck.printf("send %v(%v) to %v", args, reply, leader)
 	ok := ck.send(leader, putAppendRPCName, args, reply)
