@@ -747,6 +747,30 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 	rf.appendChan <- appendEntriesTaskArgsToSend
 }
 
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderID          int
+	LastIncludedIndex int
+	lastIncludedTerm  int
+	data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.printf("%d received installsnap msg from %d: %v", rf.me, args.LeaderID, args)
+	rf.updateTerm(args.Term)
+
+	if args.Term < rf.currentTerm {
+		rf.printf("%d reject snapshot %v", rf.me, args)
+		return
+	}
+}
+
 type appendEntriesTaskArgs struct {
 	peerInd int
 	nextInd int
