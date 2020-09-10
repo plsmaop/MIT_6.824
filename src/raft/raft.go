@@ -153,7 +153,13 @@ func (rf *Raft) getLogsByRange(start, end int) []entry {
 // must be used in critical section
 //
 func (rf *Raft) checkLogTermMatch(args *AppendEntriesArgs) bool {
-	return args.PrevLogIndex == 0 || (args.PrevLogIndex <= len(rf.logs) && args.PrevLogTerm == rf.logs[args.PrevLogIndex-1].Term)
+	prevLogInd := args.PrevLogIndex - rf.lastIncludedIndex
+	prevLogTerm := rf.lastIncludedTerm
+	if prevLogInd > 0 {
+		prevLogTerm = rf.logs[prevLogInd-1].Term
+	}
+
+	return args.PrevLogIndex == 0 || (args.PrevLogIndex <= rf.lastIncludedIndex+len(rf.logs) && args.PrevLogTerm == prevLogTerm)
 }
 
 //
@@ -167,7 +173,7 @@ func (rf *Raft) becomeLeader() {
 
 	rf.state = leader
 	rf.currentLeader = rf.me
-	nextInd := len(rf.logs) + 1
+	nextInd := rf.lastIncludedIndex + len(rf.logs) + 1
 	for peerInd := range rf.nextIndex {
 		rf.nextIndex[peerInd] = nextInd
 		rf.matchIndex[peerInd] = 0
@@ -176,7 +182,7 @@ func (rf *Raft) becomeLeader() {
 	// term entry, to ensure previous logs are commited
 	rf.appendLogs(entry{
 		CommandIndex: -1,
-		IndexInLog:   len(rf.logs) + 1,
+		IndexInLog:   nextInd,
 		Command:      nil,
 		Term:         rf.currentTerm,
 		Type:         TermEntry,
@@ -206,7 +212,7 @@ func (rf *Raft) updateTerm(term int) {
 // must be used in critical section
 //
 func (rf *Raft) getNextCmdIndex() int {
-	lastCmdInd := 0
+	lastCmdInd := rf.lastIncludedIndex
 	for i := len(rf.logs) - 1; i >= 0; i-- {
 		if rf.logs[i].Type == StateMachineCmdEntry {
 			lastCmdInd = rf.logs[i].CommandIndex
@@ -248,8 +254,8 @@ func (rf *Raft) checkLogUpTodate(args *RequestVoteArgs) bool {
 //
 func (rf *Raft) appendLogs(logs ...entry) {
 	rf.logs = append(rf.logs, logs...)
-	rf.matchIndex[rf.me] = len(rf.logs)
-	rf.nextIndex[rf.me] = len(rf.logs) + 1
+	rf.matchIndex[rf.me] = rf.lastIncludedIndex + len(rf.logs)
+	rf.nextIndex[rf.me] = rf.lastIncludedIndex + len(rf.logs) + 1
 	rf.persist()
 }
 
@@ -258,7 +264,7 @@ func (rf *Raft) appendLogs(logs ...entry) {
 // must be used in critical section
 //
 func (rf *Raft) getPrevLogTerm(nextInd int) int {
-	prevLogTerm := 0
+	prevLogTerm := rf.lastIncludedTerm
 	if nextInd > 1 {
 		prevLogTerm = rf.logs[nextInd-2].Term
 	}
@@ -383,8 +389,8 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.lastIncludedTerm = lastIncludedTerm
 	rf.logs = logs
 	selfMatchIndex := len(rf.logs)
-	rf.matchIndex[rf.me] = selfMatchIndex
-	rf.nextIndex[rf.me] = selfMatchIndex + 1
+	rf.matchIndex[rf.me] = lastIncludedIndex + selfMatchIndex
+	rf.nextIndex[rf.me] = lastIncludedIndex + selfMatchIndex + 1
 
 	// notify application to restore from snapshot
 	snapshot := rf.persister.ReadSnapshot()
@@ -409,9 +415,21 @@ func (rf *Raft) Snapshot(snapshotData []byte, snapshotInd, snapshotTerm int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	rf.snapshot(snapshotData, snapshotInd, snapshotTerm)
+}
+
+//
+// must be used in critical section
+//
+func (rf *Raft) snapshot(snapshotData []byte, snapshotInd, snapshotTerm int) {
+	startInd := snapshotInd + 1
+	if startInd > len(rf.logs)+1 {
+		startInd = len(rf.logs) + 1
+	}
+
 	rf.lastIncludedIndex = snapshotInd
 	rf.lastIncludedTerm = snapshotTerm
-	rf.logs = rf.logs[snapshotInd-1:]
+	rf.logs = rf.logs[startInd-1:]
 	state := rf.logToBtye()
 
 	rf.persister.SaveStateAndSnapshot(state, snapshotData)
@@ -751,8 +769,8 @@ type InstallSnapshotArgs struct {
 	Term              int
 	LeaderID          int
 	LastIncludedIndex int
-	lastIncludedTerm  int
-	data              []byte
+	LastIncludedTerm  int
+	Data              []byte
 }
 
 type InstallSnapshotReply struct {
@@ -764,10 +782,20 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	defer rf.mu.Unlock()
 	rf.printf("%d received installsnap msg from %d: %v", rf.me, args.LeaderID, args)
 	rf.updateTerm(args.Term)
+	reply.Term = rf.currentTerm
 
-	if args.Term < rf.currentTerm {
+	if args.Term < rf.currentTerm || args.LastIncludedIndex < rf.lastIncludedIndex {
 		rf.printf("%d reject snapshot %v", rf.me, args)
 		return
+	}
+
+	rf.snapshot(args.Data, args.LastIncludedIndex, args.LastIncludedTerm)
+	rf.applyCh <- ApplyMsg{
+		IndexInLog:   args.LastIncludedIndex,
+		CommandIndex: -1,
+		CommandTerm:  args.LastIncludedTerm,
+		CommandValid: false,
+		Command:      args.Data,
 	}
 }
 
