@@ -142,6 +142,7 @@ type Raft struct {
 // must be used in cirtical section
 //
 func (rf *Raft) getLogsByRange(start, end int) []entry {
+	start = start - rf.lastIncludedIndex
 	returnLogs := make([]entry, end-start)
 	copy(returnLogs, rf.logs[start:end])
 
@@ -153,13 +154,21 @@ func (rf *Raft) getLogsByRange(start, end int) []entry {
 // must be used in critical section
 //
 func (rf *Raft) checkLogTermMatch(args *AppendEntriesArgs) bool {
+	if args.PrevLogIndex == 0 {
+		return true
+	}
+
+	if args.PrevLogIndex > rf.lastIncludedIndex+len(rf.logs) {
+		return false
+	}
+
 	prevLogInd := args.PrevLogIndex - rf.lastIncludedIndex
 	prevLogTerm := rf.lastIncludedTerm
 	if prevLogInd > 0 {
 		prevLogTerm = rf.logs[prevLogInd-1].Term
 	}
 
-	return args.PrevLogIndex == 0 || (args.PrevLogIndex <= rf.lastIncludedIndex+len(rf.logs) && args.PrevLogTerm == prevLogTerm)
+	return args.PrevLogTerm == prevLogTerm
 }
 
 //
@@ -397,6 +406,9 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.matchIndex[rf.me] = selfMatchIndex
 	rf.nextIndex[rf.me] = selfMatchIndex + 1
 
+	rf.lastApplied = lastIncludedIndex
+	rf.commitIndex = lastIncludedIndex
+
 	// notify application to restore from snapshot
 	snapshot := rf.persister.ReadSnapshot()
 	if snapshot == nil || len(snapshot) < 1 {
@@ -522,9 +534,10 @@ func (rf *Raft) handleRequestVoteResponse(peerInd int, args *RequestVoteArgs, re
 		nextInd := rf.nextIndex[ind]
 		prevLogTerm := rf.getPrevLogTerm(nextInd)
 		appendEntriesTaskArgsToSend = append(appendEntriesTaskArgsToSend, appendEntriesTaskArgs{
-			peerInd: ind,
-			nextInd: nextInd,
-			args: AppendEntriesArgs{
+			taskType: appendLog,
+			peerInd:  ind,
+			nextInd:  nextInd,
+			appendEntriesArgs: AppendEntriesArgs{
 				Term:              rf.currentTerm,
 				LeaderID:          rf.me,
 				PrevLogIndex:      nextInd - 1,
@@ -712,7 +725,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommitIndex > rf.commitIndex {
 		old := rf.commitIndex
 		rf.commitIndex = args.LeaderCommitIndex
-		if args.LeaderCommitIndex >= rf.lastIncludedIndex+len(rf.logs) {
+		if args.LeaderCommitIndex > rf.lastIncludedIndex+len(rf.logs) {
 			rf.commitIndex = rf.lastIncludedIndex + len(rf.logs)
 		}
 
@@ -750,27 +763,40 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 	rf.nextIndex[peerInd] = nextIndex
 	rf.matchIndex[peerInd] = nextIndex - 1
 
+	appendEntriesTaskArgsToSend := appendEntriesTaskArgs{}
 	if nextIndex <= rf.lastIncludedIndex {
-
+		appendEntriesTaskArgsToSend = appendEntriesTaskArgs{
+			taskType: installSnapshot,
+			peerInd:  peerInd,
+			nextInd:  nextIndex,
+			installSnapshotArgs: InstallSnapshotArgs{
+				Term:              rf.currentTerm,
+				LeaderID:          rf.me,
+				LastIncludedIndex: rf.lastIncludedIndex,
+				LastIncludedTerm:  rf.lastIncludedTerm,
+				Data:              rf.persister.ReadSnapshot(),
+			},
+		}
+	} else {
+		prevLogTerm := rf.getPrevLogTerm(nextIndex)
+		entries := rf.getLogsByRange(nextIndex-1, len(rf.logs))
+		appendEntriesTaskArgsToSend = appendEntriesTaskArgs{
+			taskType: appendLog,
+			peerInd:  peerInd,
+			nextInd:  nextIndex,
+			appendEntriesArgs: AppendEntriesArgs{
+				Term:              rf.currentTerm,
+				LeaderID:          rf.me,
+				PrevLogIndex:      nextIndex - 1,
+				PrevLogTerm:       prevLogTerm,
+				Entries:           entries,
+				LeaderCommitIndex: rf.commitIndex,
+			},
+		}
+		rf.printf("%d leader retry to %d %v leader log: %v", rf.me, peerInd, entries, rf.logs)
 	}
 
-	prevLogTerm := rf.getPrevLogTerm(nextIndex)
-	entries := rf.getLogsByRange(nextIndex-1, len(rf.logs))
-	appendEntriesTaskArgsToSend := appendEntriesTaskArgs{
-		peerInd: peerInd,
-		nextInd: nextIndex,
-		args: AppendEntriesArgs{
-			Term:              rf.currentTerm,
-			LeaderID:          rf.me,
-			PrevLogIndex:      nextIndex - 1,
-			PrevLogTerm:       prevLogTerm,
-			Entries:           entries,
-			LeaderCommitIndex: rf.commitIndex,
-		},
-	}
-	rf.printf("%d leader retry to %d %v leader log: %v", rf.me, peerInd, entries, rf.logs)
 	rf.mu.Unlock()
-
 	rf.appendChan <- appendEntriesTaskArgsToSend
 }
 
@@ -791,7 +817,7 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
 	return ok
 }
 
-func (rf *Raft) startInstallSnapshot(peerInd, nextInd int, args InstallSnapshotArgs) {
+func (rf *Raft) startInstallSnapshot(peerInd int, args InstallSnapshotArgs) {
 	rf.mu.Lock()
 	currentTerm := rf.currentTerm
 	rf.mu.Unlock()
@@ -815,12 +841,21 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.updateTerm(args.Term)
 	reply.Term = rf.currentTerm
 
-	if args.Term < rf.currentTerm || args.LastIncludedIndex < rf.lastIncludedIndex {
+	if args.Term < rf.currentTerm || args.LastIncludedIndex < rf.lastIncludedIndex || args.LastIncludedIndex < rf.commitIndex {
 		rf.printf("%d reject snapshot %v", rf.me, args)
 		return
 	}
 
 	rf.snapshot(args.Data, args.LastIncludedIndex, args.LastIncludedTerm)
+
+	if rf.commitIndex < args.LastIncludedIndex {
+		rf.commitIndex = args.LastIncludedIndex
+	}
+
+	if rf.lastApplied < args.LastIncludedIndex {
+		rf.lastApplied = args.LastIncludedIndex
+	}
+
 	rf.applyCh <- ApplyMsg{
 		IndexInLog:   args.LastIncludedIndex,
 		CommandIndex: -1,
@@ -846,10 +881,19 @@ func (rf *Raft) handleInstallSnapshotResponse(peerInd int, args *InstallSnapshot
 	}
 }
 
+type appendEntryType int
+
+const (
+	appendLog appendEntryType = iota
+	installSnapshot
+)
+
 type appendEntriesTaskArgs struct {
-	peerInd int
-	nextInd int
-	args    AppendEntriesArgs
+	taskType            appendEntryType
+	peerInd             int
+	nextInd             int
+	appendEntriesArgs   AppendEntriesArgs
+	installSnapshotArgs InstallSnapshotArgs
 }
 
 type electionArgs struct {
@@ -874,10 +918,11 @@ func (rf *Raft) getRequestVoteArgs(now time.Time) []electionArgs {
 	rf.state = candidate
 	rf.printf("%d update term from %d to %d", rf.me, rf.currentTerm, rf.currentTerm+1)
 	rf.updateVotedForAndCurrentTerm(rf.me, rf.currentTerm+1)
-	lastLogIndex := len(rf.logs)
-	lastLogTerm := 0
+	lastLogIndex := rf.lastIncludedIndex
+	lastLogTerm := rf.lastIncludedTerm
 	if len(rf.logs) > 0 {
-		lastLogTerm = rf.logs[lastLogIndex-1].Term
+		lastLogIndex = len(rf.logs)
+		lastLogTerm = rf.logs[len(rf.logs)-1].Term
 	}
 
 	requestVoteArgsToSend := []electionArgs{}
@@ -921,20 +966,36 @@ func (rf *Raft) getAppendEntriesTaskArgs(now time.Time) []appendEntriesTaskArgs 
 		}
 
 		nextInd := rf.nextIndex[ind]
-		prevLogTerm := rf.getPrevLogTerm(nextInd)
-		entries := rf.getLogsByRange(nextInd-1, len(rf.logs))
-		appendEntriesTaskArgsToSend = append(appendEntriesTaskArgsToSend, appendEntriesTaskArgs{
-			peerInd: ind,
-			nextInd: rf.nextIndex[ind],
-			args: AppendEntriesArgs{
-				Term:              rf.currentTerm,
-				LeaderID:          rf.me,
-				LeaderCommitIndex: rf.commitIndex,
-				Entries:           entries,
-				PrevLogIndex:      nextInd - 1,
-				PrevLogTerm:       prevLogTerm,
-			},
-		})
+		if nextInd <= rf.lastIncludedIndex {
+			appendEntriesTaskArgsToSend = append(appendEntriesTaskArgsToSend, appendEntriesTaskArgs{
+				taskType: installSnapshot,
+				peerInd:  ind,
+				nextInd:  nextInd,
+				installSnapshotArgs: InstallSnapshotArgs{
+					Term:              rf.currentTerm,
+					LeaderID:          rf.me,
+					LastIncludedIndex: rf.lastIncludedIndex,
+					LastIncludedTerm:  rf.lastIncludedTerm,
+					Data:              rf.persister.ReadSnapshot(),
+				},
+			})
+		} else {
+			prevLogTerm := rf.getPrevLogTerm(nextInd)
+			entries := rf.getLogsByRange(nextInd-1, len(rf.logs))
+			appendEntriesTaskArgsToSend = append(appendEntriesTaskArgsToSend, appendEntriesTaskArgs{
+				taskType: appendLog,
+				peerInd:  ind,
+				nextInd:  nextInd,
+				appendEntriesArgs: AppendEntriesArgs{
+					Term:              rf.currentTerm,
+					LeaderID:          rf.me,
+					LeaderCommitIndex: rf.commitIndex,
+					Entries:           entries,
+					PrevLogIndex:      nextInd - 1,
+					PrevLogTerm:       prevLogTerm,
+				},
+			})
+		}
 	}
 
 	return appendEntriesTaskArgsToSend
@@ -1044,7 +1105,12 @@ func (rf *Raft) startLoop() {
 				case electionArgs := <-electionChan:
 					rf.startRequestVote(electionArgs.peerInd, electionArgs.args)
 				case appendEntriesTaskArgs := <-rf.appendChan:
-					rf.startAppendEntries(appendEntriesTaskArgs.peerInd, appendEntriesTaskArgs.args)
+					switch appendEntriesTaskArgs.taskType {
+					case appendLog:
+						rf.startAppendEntries(appendEntriesTaskArgs.peerInd, appendEntriesTaskArgs.appendEntriesArgs)
+					case installSnapshot:
+						rf.startInstallSnapshot(appendEntriesTaskArgs.peerInd, appendEntriesTaskArgs.installSnapshotArgs)
+					}
 				}
 			}
 		}()
@@ -1079,7 +1145,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.appendLogs(entry{
 		Term:         rf.currentTerm,
 		Command:      command,
-		IndexInLog:   len(rf.logs) + 1,
+		IndexInLog:   rf.lastIncludedIndex + len(rf.logs) + 1,
 		CommandIndex: cmdInd,
 		Type:         StateMachineCmdEntry,
 	})
