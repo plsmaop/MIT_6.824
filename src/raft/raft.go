@@ -230,19 +230,23 @@ func (rf *Raft) getNextCmdIndex() int {
 //
 func (rf *Raft) checkLogUpTodate(args *RequestVoteArgs) bool {
 	// start from 1
-	logLastIndex := len(rf.logs)
-	if len(rf.logs) == 0 {
+	if rf.lastIncludedIndex+len(rf.logs) == 0 {
 		return true
 	}
 
-	if args.LastLogTerm > rf.logs[logLastIndex-1].Term {
+	logLastTerm := rf.lastIncludedTerm
+	if len(rf.logs) > 0 {
+		logLastTerm = rf.logs[len(rf.logs)-1].Term
+	}
+
+	if args.LastLogTerm > logLastTerm {
 		// last log with latest term
 		return true
 	}
 
-	if args.LastLogTerm == rf.logs[logLastIndex-1].Term {
+	if args.LastLogTerm == logLastTerm {
 		// same last term but longer log
-		return args.LastLogIndex >= logLastIndex
+		return args.LastLogIndex >= rf.lastIncludedIndex+len(rf.logs)
 	}
 
 	return false
@@ -265,8 +269,9 @@ func (rf *Raft) appendLogs(logs ...entry) {
 //
 func (rf *Raft) getPrevLogTerm(nextInd int) int {
 	prevLogTerm := rf.lastIncludedTerm
-	if nextInd > 1 {
-		prevLogTerm = rf.logs[nextInd-2].Term
+	index := nextInd - rf.lastIncludedIndex
+	if index > 1 {
+		prevLogTerm = rf.logs[index-2].Term
 	}
 
 	return prevLogTerm
@@ -388,9 +393,9 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.lastIncludedIndex = lastIncludedIndex
 	rf.lastIncludedTerm = lastIncludedTerm
 	rf.logs = logs
-	selfMatchIndex := len(rf.logs)
-	rf.matchIndex[rf.me] = lastIncludedIndex + selfMatchIndex
-	rf.nextIndex[rf.me] = lastIncludedIndex + selfMatchIndex + 1
+	selfMatchIndex := lastIncludedIndex + len(rf.logs)
+	rf.matchIndex[rf.me] = selfMatchIndex
+	rf.nextIndex[rf.me] = selfMatchIndex + 1
 
 	// notify application to restore from snapshot
 	snapshot := rf.persister.ReadSnapshot()
@@ -422,14 +427,14 @@ func (rf *Raft) Snapshot(snapshotData []byte, snapshotInd, snapshotTerm int) {
 // must be used in critical section
 //
 func (rf *Raft) snapshot(snapshotData []byte, snapshotInd, snapshotTerm int) {
-	startInd := snapshotInd + 1
-	if startInd > len(rf.logs)+1 {
-		startInd = len(rf.logs) + 1
+	startInd := snapshotInd
+	if startInd > len(rf.logs) {
+		startInd = len(rf.logs)
 	}
 
 	rf.lastIncludedIndex = snapshotInd
 	rf.lastIncludedTerm = snapshotTerm
-	rf.logs = rf.logs[startInd-1:]
+	rf.logs = rf.logs[startInd:]
 	state := rf.logToBtye()
 
 	rf.persister.SaveStateAndSnapshot(state, snapshotData)
@@ -654,7 +659,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.printf("%v fuck %v", rf, args)
 		// return term of the conflicting entry and the first index of that term
 
-		conflictIndex := args.PrevLogIndex
+		conflictIndex := args.PrevLogIndex - rf.lastIncludedIndex
 		if conflictIndex > len(rf.logs) {
 			conflictIndex = len(rf.logs)
 		}
@@ -682,7 +687,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// accept
 	if args.Term == rf.currentTerm && rf.state == follower && termMatch {
 		reply.Success = true
-		nextIndex := args.PrevLogIndex + 1
+		nextIndex := args.PrevLogIndex + 1 - rf.lastIncludedIndex
 		argsEntryIndex := 0
 
 		// find first agreement
@@ -707,8 +712,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommitIndex > rf.commitIndex {
 		old := rf.commitIndex
 		rf.commitIndex = args.LeaderCommitIndex
-		if args.LeaderCommitIndex >= len(rf.logs) {
-			rf.commitIndex = len(rf.logs)
+		if args.LeaderCommitIndex >= rf.lastIncludedIndex+len(rf.logs) {
+			rf.commitIndex = rf.lastIncludedIndex + len(rf.logs)
 		}
 
 		rf.printf("%d update commit index from %d to %d(leader's: %d) by leader %d, matchIndex: %v", rf.me, old, rf.commitIndex, args.LeaderCommitIndex, args.LeaderID, rf.matchIndex[rf.me])
