@@ -607,7 +607,7 @@ type AppendEntriesReply struct {
 	Success              bool
 }
 
-func (rf *Raft) startAppendEntries(peerInd, nextInd int, args AppendEntriesArgs) {
+func (rf *Raft) startAppendEntries(peerInd int, args AppendEntriesArgs) {
 	rf.mu.Lock()
 	currentTerm := rf.currentTerm
 	rf.mu.Unlock()
@@ -679,7 +679,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 
 		reply.FailTerm = failTerm
-		reply.FirstIndexOfFailTerm = firstIndexOfFailTerm
+		reply.FirstIndexOfFailTerm = firstIndexOfFailTerm + rf.lastIncludedIndex
 
 		return
 	}
@@ -750,6 +750,10 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 	rf.nextIndex[peerInd] = nextIndex
 	rf.matchIndex[peerInd] = nextIndex - 1
 
+	if nextIndex <= rf.lastIncludedIndex {
+
+	}
+
 	prevLogTerm := rf.getPrevLogTerm(nextIndex)
 	entries := rf.getLogsByRange(nextIndex-1, len(rf.logs))
 	appendEntriesTaskArgsToSend := appendEntriesTaskArgs{
@@ -782,6 +786,28 @@ type InstallSnapshotReply struct {
 	Term int
 }
 
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
+}
+
+func (rf *Raft) startInstallSnapshot(peerInd, nextInd int, args InstallSnapshotArgs) {
+	rf.mu.Lock()
+	currentTerm := rf.currentTerm
+	rf.mu.Unlock()
+	if currentTerm > args.Term {
+		return
+	}
+
+	reply := InstallSnapshotReply{}
+
+	if !rf.sendInstallSnapshot(peerInd, &args, &reply) {
+		return
+	}
+
+	rf.handleInstallSnapshotResponse(peerInd, &args, &reply)
+}
+
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -801,6 +827,22 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		CommandTerm:  args.LastIncludedTerm,
 		CommandValid: false,
 		Command:      args.Data,
+	}
+}
+
+func (rf *Raft) handleInstallSnapshotResponse(peerInd int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	rf.updateTerm(reply.Term)
+	if rf.currentTerm > reply.Term || rf.state != leader || args.Term != reply.Term {
+		// drop stale response
+		return
+	}
+
+	if rf.matchIndex[peerInd] < rf.lastIncludedIndex {
+		rf.nextIndex[peerInd] = rf.lastIncludedIndex + 1
+		rf.matchIndex[peerInd] = rf.lastIncludedIndex
 	}
 }
 
@@ -1002,7 +1044,7 @@ func (rf *Raft) startLoop() {
 				case electionArgs := <-electionChan:
 					rf.startRequestVote(electionArgs.peerInd, electionArgs.args)
 				case appendEntriesTaskArgs := <-rf.appendChan:
-					rf.startAppendEntries(appendEntriesTaskArgs.peerInd, appendEntriesTaskArgs.nextInd, appendEntriesTaskArgs.args)
+					rf.startAppendEntries(appendEntriesTaskArgs.peerInd, appendEntriesTaskArgs.args)
 				}
 			}
 		}()
