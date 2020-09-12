@@ -83,9 +83,10 @@ const (
 
 const (
 	electionTimeoutPeriodBase = int64(time.Millisecond * 300)
-	randMax                   = 500
+	randMax                   = 700
 	randMin                   = 100
 	period                    = 100
+	workerNum                 = 15
 )
 
 func (rf *Raft) newRandomNum() int64 {
@@ -221,7 +222,7 @@ func (rf *Raft) updateTerm(term int) {
 // must be used in critical section
 //
 func (rf *Raft) getNextCmdIndex() int {
-	lastCmdInd := rf.lastIncludedIndex
+	lastCmdInd := rf.lastIncludedIndex - rf.lastIncludedTerm
 	for i := len(rf.logs) - 1; i >= 0; i-- {
 		if rf.logs[i].Type == StateMachineCmdEntry {
 			lastCmdInd = rf.logs[i].CommandIndex
@@ -416,6 +417,7 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 
 	rf.applyCh <- ApplyMsg{
+		Type:         SnapshotEntry,
 		IndexInLog:   lastIncludedIndex,
 		CommandIndex: -1,
 		CommandTerm:  lastIncludedTerm,
@@ -439,7 +441,7 @@ func (rf *Raft) Snapshot(snapshotData []byte, snapshotInd, snapshotTerm int) {
 // must be used in critical section
 //
 func (rf *Raft) snapshot(snapshotData []byte, snapshotInd, snapshotTerm int) {
-	startInd := snapshotInd
+	startInd := snapshotInd - rf.lastIncludedIndex
 	if startInd > len(rf.logs) {
 		startInd = len(rf.logs)
 	}
@@ -857,6 +859,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	rf.applyCh <- ApplyMsg{
+		Type:         SnapshotEntry,
 		IndexInLog:   args.LastIncludedIndex,
 		CommandIndex: -1,
 		CommandTerm:  args.LastIncludedTerm,
@@ -1014,7 +1017,7 @@ func (rf *Raft) getCommitedEntriesToApply() []ApplyMsg {
 		sort.Ints(matchIndex)
 
 		commitIndex = matchIndex[len(matchIndex)/2]
-		if commitIndex == 0 || rf.logs[commitIndex-1].Term != rf.currentTerm {
+		if commitIndex-rf.lastIncludedIndex <= 0 || rf.logs[commitIndex-rf.lastIncludedIndex-1].Term != rf.currentTerm {
 			// no advance
 			commitIndex = rf.commitIndex
 		} else {
@@ -1023,10 +1026,12 @@ func (rf *Raft) getCommitedEntriesToApply() []ApplyMsg {
 		}
 	}
 
-	for i := rf.lastApplied; i < commitIndex; i++ {
+	startToApply := rf.lastApplied - rf.lastIncludedIndex
+	commitIndexInLog := commitIndex - rf.lastIncludedIndex
+	for i := startToApply; i < commitIndexInLog; i++ {
 		entriesToApply = append(entriesToApply, ApplyMsg{
 			Type:         rf.logs[i].Type,
-			IndexInLog:   i + 1,
+			IndexInLog:   rf.lastIncludedIndex + i + 1,
 			Command:      rf.logs[i].Command,
 			CommandValid: rf.logs[i].Type == StateMachineCmdEntry,
 			CommandIndex: rf.logs[i].CommandIndex,
@@ -1096,7 +1101,7 @@ func (rf *Raft) startLoop() {
 		}
 	}()
 
-	for i := 0; i < len(rf.peers)*10; i++ {
+	for i := 0; i < len(rf.peers)*workerNum; i++ {
 		go func() {
 			for {
 				select {
