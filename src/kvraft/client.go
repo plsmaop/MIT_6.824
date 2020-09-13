@@ -13,11 +13,10 @@ import (
 )
 
 const (
-	exBackoffWaitTime time.Duration = 2
-	reqTimeout                      = 2 * time.Second
-	receiver                        = "KVServer"
-	getRPCName                      = receiver + ".Get"
-	putAppendRPCName                = receiver + ".PutAppend"
+	reqTimeout       = 2 * time.Second
+	receiver         = "KVServer"
+	getRPCName       = receiver + ".Get"
+	putAppendRPCName = receiver + ".PutAppend"
 )
 
 type Clerk struct {
@@ -88,18 +87,12 @@ func (ck *Clerk) send(leader int64, rpcName string, args Args, reply Reply) bool
 func (ck *Clerk) sendGet(args *GetArgs) GetReply {
 	reply := &GetReply{}
 	leader := ck.getCurLeader()
-	waitTime := exBackoffWaitTime
 
 	ck.printf("send %v(%v) to %v", args, reply, leader)
 	ok := ck.send(leader, getRPCName, args, reply)
 	ck.printf("received: %v : %v from %v", args, reply, leader)
 
 	for !ok || reply.Err == ErrWrongLeader || reply.Err == ErrFail {
-		if !ok {
-			time.Sleep(waitTime * time.Nanosecond)
-			waitTime *= waitTime
-		}
-
 		leader = (leader + 1) % int64(len(ck.servers))
 		reply = &GetReply{}
 		ck.printf("send %v(%v) to %v", args, reply, leader)
@@ -145,8 +138,8 @@ func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
 	args := GetArgs{
-		Key:      key,
-		Time:     time.Now().UnixNano(),
+		Key: key,
+		// Time:     time.Now().UnixNano(),
 		ClientID: ck.id,
 		SeqNum:   int64(ck.getSeqNum()),
 	}
@@ -158,18 +151,12 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) sendPutAppend(args *PutAppendArgs) PutAppendReply {
 	reply := &PutAppendReply{}
 	leader := ck.getCurLeader()
-	waitTime := exBackoffWaitTime
 
 	ck.printf("send %v(%v) to %v", args, reply, leader)
 	ok := ck.send(leader, putAppendRPCName, args, reply)
 	ck.printf("received: %v : %v from %v", args, reply, leader)
 
 	for !ok || reply.Err == ErrWrongLeader || reply.Err == ErrFail {
-		if !ok {
-			time.Sleep(waitTime * time.Nanosecond)
-			waitTime *= waitTime
-		}
-
 		leader = (leader + 1) % int64(len(ck.servers))
 		reply = &PutAppendReply{}
 		ck.printf("send %v(%v) to %v", args, reply, leader)
@@ -209,9 +196,9 @@ func (ck *Clerk) putAppend(args *PutAppendArgs) {
 func (ck *Clerk) PutAppend(key string, value string, op opType) {
 	// You will have to modify this function.
 	args := PutAppendArgs{
-		Key:      key,
-		Value:    value,
-		Time:     time.Now().UnixNano(),
+		Key:   key,
+		Value: value,
+		// Time:     time.Now().UnixNano(),
 		Op:       op,
 		ClientID: ck.id,
 		SeqNum:   ck.getSeqNum(),

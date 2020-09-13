@@ -157,6 +157,7 @@ func (kv *KVServer) setClient(c *client) {
 		return
 	}
 
+	kv.printf("set new client: %v", c)
 	client.SeqNum = c.SeqNum
 	client.AppliedInd = c.AppliedInd
 	client.AppliedTerm = c.AppliedTerm
@@ -183,6 +184,7 @@ func (kv *KVServer) copyClientTable() map[string]client {
 	for k, v := range kv.clientTable {
 		c := *v
 		copiedClientTable[k] = c
+		kv.printf("copying client table: %v", copiedClientTable)
 	}
 
 	return copiedClientTable
@@ -192,8 +194,15 @@ func (kv *KVServer) installClientTable(ct map[string]client) {
 	kv.ctMu.Lock()
 	defer kv.ctMu.Unlock()
 
-	for k, v := range ct {
-		kv.clientTable[k] = &v
+	for k, c := range ct {
+		kv.clientTable[k] = &client{
+			ClientID:          c.ClientID,
+			SeqNum:            c.SeqNum,
+			AppliedInd:        c.AppliedInd,
+			AppliedTerm:       c.AppliedTerm,
+			LastExecutedValue: c.LastExecutedValue,
+		}
+		kv.printf("installing client table: %v", kv.clientTable)
 	}
 }
 
@@ -206,13 +215,13 @@ func (kv *KVServer) startRequest(args Args, reply Reply) (raftLogInd int, succes
 		if c.SeqNum > seqNum {
 			// stale request
 			// discard
-			kv.printf("Stale req: %v", args)
+			kv.printf("Stale req: %v, client datta in table: %v", args, c)
 			return -1, false
 		}
 
 		if c.SeqNum == seqNum {
 			// successs request
-			reply.SetTime(time.Now().UnixNano())
+			// reply.SetTime(time.Now().UnixNano())
 
 			e := OK
 			v := c.LastExecutedValue
@@ -239,7 +248,7 @@ func (kv *KVServer) startRequest(args Args, reply Reply) (raftLogInd int, succes
 
 	if !ok {
 		reply.SetErr(ErrWrongLeader)
-		reply.SetTime(time.Now().UnixNano())
+		// reply.SetTime(time.Now().UnixNano())
 		kv.printf("I am no leader: %v : %v", args, reply)
 		return -1, false
 	}
@@ -276,7 +285,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}))
 
 	opDone := <-done
-	reply.Time = time.Now().UnixNano()
+	// reply.Time = time.Now().UnixNano()
 	if opDone.Type != opType || opDone.ClientID != cID || opDone.SeqNum != seqNum {
 		reply.SetErr(ErrFail)
 		kv.printf("%v:%v failed", cID, seqNum)
@@ -325,7 +334,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}))
 
 	opDone := <-done
-	reply.Time = time.Now().UnixNano()
+	// reply.Time = time.Now().UnixNano()
 	if opDone.Type != opType || opDone.ClientID != cID || opDone.SeqNum != seqNum {
 		reply.SetErr(ErrFail)
 		kv.printf("%v:%v failed", cID, seqNum)
@@ -434,19 +443,21 @@ func (kv *KVServer) cleanUpSatleReq() {
 	}
 }
 
-func (kv *KVServer) snapshot(index, term int) {
+func (kv *KVServer) snapshot(indexInLog, cmdInd, term int) {
 	if kv.maxraftstate == -1 || kv.maxraftstate > kv.rf.GetPersistentSize() {
 		return
 	}
 
 	clientTable := kv.copyClientTable()
+	kv.printf("client table to be snapshoted: %v", clientTable)
+	kv.printf("store to be snapshoted: %v", kv.store)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 
 	e.Encode(kv.store)
 	e.Encode(clientTable)
 	data := w.Bytes()
-	kv.rf.Snapshot(data, index, term)
+	kv.rf.Snapshot(data, indexInLog, cmdInd, term)
 }
 
 func (kv *KVServer) restoreStateFromSnapshot(msg raft.ApplyMsg) {
@@ -455,7 +466,10 @@ func (kv *KVServer) restoreStateFromSnapshot(msg raft.ApplyMsg) {
 		log.Fatalf("%v failed to restore from snapshot", kv.me)
 	}
 
-	if snapshot == nil || len(snapshot) < 1 {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if snapshot == nil || len(snapshot) < 1 || int64(msg.CommandIndex) < kv.appliedInd {
+		kv.printf("reject installsnapshot: %v", msg)
 		return
 	}
 
@@ -469,8 +483,15 @@ func (kv *KVServer) restoreStateFromSnapshot(msg raft.ApplyMsg) {
 		log.Fatalf("%d restore failed", kv.me)
 	}
 
+	kv.printf("instal lsnapshot go go: %v", msg)
+	kv.printf("original store: %v", kv.store)
 	kv.store = kvstore
+	kv.printf("new store: %v", kvstore)
+
+	kv.printf("original client table: %v", kv.clientTable)
+	kv.printf("new client table: %v", clientTable)
 	kv.installClientTable(clientTable)
+	kv.updateAppliedInd(int64(msg.CommandIndex))
 	kv.updateAppliedTerm(int64(msg.CommandTerm))
 }
 
@@ -482,7 +503,7 @@ func (kv *KVServer) processApplyMsg(msg raft.ApplyMsg) {
 		if int64(msg.CommandTerm) > kv.getAppliedTerm() {
 			kv.updateAppliedTerm(int64(msg.CommandTerm))
 		}
-		kv.snapshot(msg.IndexInLog, msg.CommandTerm)
+		kv.snapshot(msg.IndexInLog, msg.CommandIndex, msg.CommandTerm)
 	case raft.SnapshotEntry:
 		kv.restoreStateFromSnapshot(msg)
 	case raft.TermEntry:
