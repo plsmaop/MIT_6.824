@@ -134,8 +134,9 @@ type Raft struct {
 	currentLeader int
 
 	// for snapshot
-	lastIncludedIndex int
-	lastIncludedTerm  int
+	lastIncludedIndex  int
+	lastIncludedCmdInd int
+	lastIncludedTerm   int
 }
 
 //
@@ -222,7 +223,7 @@ func (rf *Raft) updateTerm(term int) {
 // must be used in critical section
 //
 func (rf *Raft) getNextCmdIndex() int {
-	lastCmdInd := rf.lastIncludedIndex - rf.lastIncludedTerm
+	lastCmdInd := rf.lastIncludedCmdInd
 	for i := len(rf.logs) - 1; i >= 0; i-- {
 		if rf.logs[i].Type == StateMachineCmdEntry {
 			lastCmdInd = rf.logs[i].CommandIndex
@@ -307,6 +308,7 @@ func (rf *Raft) logToBtye() []byte {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedCmdInd)
 	e.Encode(rf.lastIncludedTerm)
 	e.Encode(rf.logs)
 	return w.Bytes()
@@ -387,11 +389,12 @@ func (rf *Raft) readPersist(data []byte) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 
-	var currentTerm, votedFor, lastIncludedIndex, lastIncludedTerm int
+	var currentTerm, votedFor, lastIncludedIndex, lastIncludedCmdInd, lastIncludedTerm int
 	var logs []entry
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
 		d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&lastIncludedCmdInd) != nil ||
 		d.Decode(&lastIncludedTerm) != nil ||
 		d.Decode(&logs) != nil {
 		log.Fatalf("%d restore failed", rf.me)
@@ -401,6 +404,7 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.currentTerm = currentTerm
 	rf.votedFor = votedFor
 	rf.lastIncludedIndex = lastIncludedIndex
+	rf.lastIncludedCmdInd = lastIncludedCmdInd
 	rf.lastIncludedTerm = lastIncludedTerm
 	rf.logs = logs
 	selfMatchIndex := lastIncludedIndex + len(rf.logs)
@@ -419,7 +423,7 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.applyCh <- ApplyMsg{
 		Type:         SnapshotEntry,
 		IndexInLog:   lastIncludedIndex,
-		CommandIndex: -1,
+		CommandIndex: lastIncludedCmdInd,
 		CommandTerm:  lastIncludedTerm,
 		CommandValid: false,
 		Command:      snapshot,
@@ -430,23 +434,24 @@ func (rf *Raft) GetPersistentSize() int {
 	return rf.persister.RaftStateSize()
 }
 
-func (rf *Raft) Snapshot(snapshotData []byte, snapshotInd, snapshotTerm int) {
+func (rf *Raft) Snapshot(snapshotData []byte, snapshotIndInlog, snapshotCmdInd, snapshotTerm int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	rf.snapshot(snapshotData, snapshotInd, snapshotTerm)
+	rf.snapshot(snapshotData, snapshotIndInlog, snapshotCmdInd, snapshotTerm)
 }
 
 //
 // must be used in critical section
 //
-func (rf *Raft) snapshot(snapshotData []byte, snapshotInd, snapshotTerm int) {
-	startInd := snapshotInd - rf.lastIncludedIndex
+func (rf *Raft) snapshot(snapshotData []byte, snapshotIndInlog, snapshotCmdInd, snapshotTerm int) {
+	startInd := snapshotIndInlog - rf.lastIncludedIndex
 	if startInd > len(rf.logs) {
 		startInd = len(rf.logs)
 	}
 
-	rf.lastIncludedIndex = snapshotInd
+	rf.lastIncludedIndex = snapshotIndInlog
+	rf.lastIncludedCmdInd = snapshotCmdInd
 	rf.lastIncludedTerm = snapshotTerm
 	rf.logs = rf.logs[startInd:]
 	state := rf.logToBtye()
@@ -772,11 +777,12 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 			peerInd:  peerInd,
 			nextInd:  nextIndex,
 			installSnapshotArgs: InstallSnapshotArgs{
-				Term:              rf.currentTerm,
-				LeaderID:          rf.me,
-				LastIncludedIndex: rf.lastIncludedIndex,
-				LastIncludedTerm:  rf.lastIncludedTerm,
-				Data:              rf.persister.ReadSnapshot(),
+				Term:               rf.currentTerm,
+				LeaderID:           rf.me,
+				LastIncludedIndex:  rf.lastIncludedIndex,
+				LastIncludedCmdInd: rf.lastIncludedCmdInd,
+				LastIncludedTerm:   rf.lastIncludedTerm,
+				Data:               rf.persister.ReadSnapshot(),
 			},
 		}
 	} else {
@@ -803,11 +809,12 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 }
 
 type InstallSnapshotArgs struct {
-	Term              int
-	LeaderID          int
-	LastIncludedIndex int
-	LastIncludedTerm  int
-	Data              []byte
+	Term               int
+	LeaderID           int
+	LastIncludedIndex  int
+	LastIncludedCmdInd int
+	LastIncludedTerm   int
+	Data               []byte
 }
 
 type InstallSnapshotReply struct {
@@ -848,7 +855,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		return
 	}
 
-	rf.snapshot(args.Data, args.LastIncludedIndex, args.LastIncludedTerm)
+	rf.snapshot(args.Data, args.LastIncludedIndex, args.LastIncludedCmdInd, args.LastIncludedTerm)
+	rf.printf("%d save snapshot: %v", rf.me, args)
 
 	if rf.commitIndex < args.LastIncludedIndex {
 		rf.commitIndex = args.LastIncludedIndex
@@ -861,7 +869,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.applyCh <- ApplyMsg{
 		Type:         SnapshotEntry,
 		IndexInLog:   args.LastIncludedIndex,
-		CommandIndex: -1,
+		CommandIndex: args.LastIncludedCmdInd,
 		CommandTerm:  args.LastIncludedTerm,
 		CommandValid: false,
 		Command:      args.Data,
@@ -975,11 +983,12 @@ func (rf *Raft) getAppendEntriesTaskArgs(now time.Time) []appendEntriesTaskArgs 
 				peerInd:  ind,
 				nextInd:  nextInd,
 				installSnapshotArgs: InstallSnapshotArgs{
-					Term:              rf.currentTerm,
-					LeaderID:          rf.me,
-					LastIncludedIndex: rf.lastIncludedIndex,
-					LastIncludedTerm:  rf.lastIncludedTerm,
-					Data:              rf.persister.ReadSnapshot(),
+					Term:               rf.currentTerm,
+					LeaderID:           rf.me,
+					LastIncludedIndex:  rf.lastIncludedIndex,
+					LastIncludedCmdInd: rf.lastIncludedCmdInd,
+					LastIncludedTerm:   rf.lastIncludedTerm,
+					Data:               rf.persister.ReadSnapshot(),
 				},
 			})
 		} else {
