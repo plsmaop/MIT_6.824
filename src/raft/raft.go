@@ -257,9 +257,11 @@ func (rf *Raft) checkLogUpTodate(args *RequestVoteArgs) bool {
 
 	if args.LastLogTerm == logLastTerm {
 		// same last term but longer log
+		rf.printf("%v: my last log ind: %v, log: %v, yours: %v", rf.me, rf.lastIncludedIndex, rf.logs, args)
 		return args.LastLogIndex >= rf.lastIncludedIndex+len(rf.logs)
 	}
 
+	rf.printf("%v: %v not update to date with %v %v %v", rf.me, args, logLastTerm, rf.lastIncludedIndex, rf.logs)
 	return false
 }
 
@@ -498,7 +500,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.electionTimeout = rf.newTimeout()
 		rf.printf("%d vote for %d in term %d", rf.me, rf.votedFor, rf.currentTerm)
 	} else {
-		rf.printf("%d reject vote for %d in term %d", rf.me, args.CandidateID, rf.currentTerm)
+		rf.printf("%d reject vote for %d in term %d (votedFor: %v)", rf.me, args.CandidateID, rf.currentTerm, rf.votedFor)
 	}
 
 	reply.VoteGranted = grant
@@ -850,8 +852,15 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.updateTerm(args.Term)
 	reply.Term = rf.currentTerm
 
-	if args.Term < rf.currentTerm || args.LastIncludedIndex < rf.lastIncludedIndex || args.LastIncludedIndex < rf.commitIndex {
+	if args.Term < rf.currentTerm {
 		rf.printf("%d reject snapshot %v", rf.me, args)
+		return
+	}
+
+	// reset timeout
+	rf.electionTimeout = rf.newTimeout()
+	if args.LastIncludedIndex < rf.lastIncludedIndex || args.LastIncludedIndex < rf.commitIndex {
+		rf.printf("%d no need to install snapshot %v", rf.me, args)
 		return
 	}
 
@@ -932,7 +941,7 @@ func (rf *Raft) getRequestVoteArgs(now time.Time) []electionArgs {
 	lastLogIndex := rf.lastIncludedIndex
 	lastLogTerm := rf.lastIncludedTerm
 	if len(rf.logs) > 0 {
-		lastLogIndex = len(rf.logs)
+		lastLogIndex = rf.lastIncludedIndex + len(rf.logs)
 		lastLogTerm = rf.logs[len(rf.logs)-1].Term
 	}
 
