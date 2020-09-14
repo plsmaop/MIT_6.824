@@ -449,6 +449,10 @@ func (rf *Raft) Snapshot(snapshotData []byte, snapshotIndInlog, snapshotCmdInd, 
 // must be used in critical section
 //
 func (rf *Raft) snapshot(snapshotData []byte, snapshotIndInlog, snapshotCmdInd, snapshotTerm int) {
+	if snapshotIndInlog <= rf.lastIncludedIndex {
+		return
+	}
+
 	startInd := snapshotIndInlog - rf.lastIncludedIndex
 	if startInd > len(rf.logs) {
 		startInd = len(rf.logs)
