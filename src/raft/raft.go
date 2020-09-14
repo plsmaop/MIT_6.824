@@ -1157,9 +1157,9 @@ func (rf *Raft) startLoop() {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	if rf.state != leader || rf.killed() {
+		rf.mu.Unlock()
 		return -1, -1, false
 	}
 
@@ -1172,6 +1172,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		CommandIndex: cmdInd,
 		Type:         StateMachineCmdEntry,
 	})
+	rf.mu.Unlock()
+
+	go func() {
+		appendEntriesTaskArgsToSend := rf.getAppendEntriesTaskArgs(time.Now())
+		for _, appendEntriesTaskArgs := range appendEntriesTaskArgsToSend {
+			rf.appendChan <- appendEntriesTaskArgs
+		}
+	}()
 
 	return cmdInd, term, true
 }
