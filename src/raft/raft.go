@@ -422,14 +422,16 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 
-	rf.applyCh <- ApplyMsg{
-		Type:         SnapshotEntry,
-		IndexInLog:   lastIncludedIndex,
-		CommandIndex: lastIncludedCmdInd,
-		CommandTerm:  lastIncludedTerm,
-		CommandValid: false,
-		Command:      snapshot,
-	}
+	go func() {
+		rf.applyCh <- ApplyMsg{
+			Type:         SnapshotEntry,
+			IndexInLog:   lastIncludedIndex,
+			CommandIndex: lastIncludedCmdInd,
+			CommandTerm:  lastIncludedTerm,
+			CommandValid: false,
+			Command:      snapshot,
+		}
+	}()
 }
 
 func (rf *Raft) GetPersistentSize() int {
@@ -656,8 +658,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 	rf.printf("%d received append msg from %d: %v", rf.me, args.LeaderID, args)
 	rf.updateTerm(args.Term)
-	termMatch := rf.checkLogTermMatch(args)
-
 	reply.Term = rf.currentTerm
 
 	// reject
@@ -669,6 +669,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// reset timeout
 	rf.electionTimeout = rf.newTimeout()
+	termMatch := rf.checkLogTermMatch(args)
+
 	// return to follower
 	if args.Term == rf.currentTerm && rf.state == candidate {
 		rf.state = follower
@@ -713,6 +715,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		argsEntryIndex := 0
 
 		// find first agreement
+		for nextIndex < 1 {
+			nextIndex++
+			argsEntryIndex++
+		}
+
 		for ; nextIndex <= len(rf.logs) && argsEntryIndex < len(args.Entries); nextIndex++ {
 			if rf.logs[nextIndex-1].Term != args.Entries[argsEntryIndex].Term || rf.logs[nextIndex-1].Command != args.Entries[argsEntryIndex].Command {
 				break
