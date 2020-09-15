@@ -870,7 +870,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	// reset timeout
 	rf.electionTimeout = rf.newTimeout()
-	if args.LastIncludedIndex < rf.lastIncludedIndex || args.LastIncludedIndex < rf.commitIndex {
+	if args.LastIncludedIndex <= rf.lastIncludedIndex || args.LastIncludedIndex <= rf.commitIndex {
 		rf.printf("%d no need to install snapshot %v", rf.me, args)
 		return
 	}
@@ -1072,6 +1072,7 @@ func (rf *Raft) getCommitedEntriesToApply() []ApplyMsg {
 		rf.printf("%d entries: %v\nentries to commit: %v\n", rf.me, rf.logs, entriesToApply)
 	}
 
+	rf.lastApplied += len(entriesToApply)
 	return entriesToApply
 }
 
@@ -1097,10 +1098,6 @@ func (rf *Raft) startLoop() {
 					rf.applyCh <- applyMsg
 					rf.printf("%d apply index: %d", rf.me, applyMsg.CommandIndex)
 				}
-
-				rf.mu.Lock()
-				rf.lastApplied += len(entriesToApply)
-				rf.mu.Unlock()
 			}
 
 			time.Sleep(10 * time.Millisecond)
