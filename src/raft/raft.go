@@ -858,13 +858,13 @@ func (rf *Raft) startInstallSnapshot(peerInd int, args InstallSnapshotArgs) {
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	rf.printf("%d received installsnap msg from %d: %v", rf.me, args.LeaderID, args)
 	rf.updateTerm(args.Term)
 	reply.Term = rf.currentTerm
 
 	if args.Term < rf.currentTerm {
 		rf.printf("%d reject snapshot %v", rf.me, args)
+		rf.mu.Unlock()
 		return
 	}
 
@@ -872,6 +872,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.electionTimeout = rf.newTimeout()
 	if args.LastIncludedIndex <= rf.lastIncludedIndex || args.LastIncludedIndex <= rf.commitIndex {
 		rf.printf("%d no need to install snapshot %v", rf.me, args)
+		rf.mu.Unlock()
 		return
 	}
 
@@ -885,17 +886,16 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if rf.lastApplied < args.LastIncludedIndex {
 		rf.lastApplied = args.LastIncludedIndex
 	}
+	rf.mu.Unlock()
 
-	go func() {
-		rf.applyCh <- ApplyMsg{
-			Type:         SnapshotEntry,
-			IndexInLog:   args.LastIncludedIndex,
-			CommandIndex: args.LastIncludedCmdInd,
-			CommandTerm:  args.LastIncludedTerm,
-			CommandValid: false,
-			Command:      args.Data,
-		}
-	}()
+	rf.applyCh <- ApplyMsg{
+		Type:         SnapshotEntry,
+		IndexInLog:   args.LastIncludedIndex,
+		CommandIndex: args.LastIncludedCmdInd,
+		CommandTerm:  args.LastIncludedTerm,
+		CommandValid: false,
+		Command:      args.Data,
+	}
 }
 
 func (rf *Raft) handleInstallSnapshotResponse(peerInd int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
