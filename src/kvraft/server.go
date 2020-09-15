@@ -184,7 +184,6 @@ func (kv *KVServer) copyClientTable() map[string]client {
 	for k, v := range kv.clientTable {
 		c := *v
 		copiedClientTable[k] = c
-		kv.printf("copying client table: %v", copiedClientTable)
 	}
 
 	return copiedClientTable
@@ -202,8 +201,9 @@ func (kv *KVServer) installClientTable(ct map[string]client) {
 			AppliedTerm:       c.AppliedTerm,
 			LastExecutedValue: c.LastExecutedValue,
 		}
-		kv.printf("installing client table: %v", kv.clientTable)
 	}
+
+	kv.printf("installing client table: %v", kv.clientTable)
 }
 
 func (kv *KVServer) startRequest(args Args, reply Reply) (raftLogInd int, success bool) {

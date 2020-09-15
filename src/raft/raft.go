@@ -886,14 +886,16 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.lastApplied = args.LastIncludedIndex
 	}
 
-	rf.applyCh <- ApplyMsg{
-		Type:         SnapshotEntry,
-		IndexInLog:   args.LastIncludedIndex,
-		CommandIndex: args.LastIncludedCmdInd,
-		CommandTerm:  args.LastIncludedTerm,
-		CommandValid: false,
-		Command:      args.Data,
-	}
+	go func() {
+		rf.applyCh <- ApplyMsg{
+			Type:         SnapshotEntry,
+			IndexInLog:   args.LastIncludedIndex,
+			CommandIndex: args.LastIncludedCmdInd,
+			CommandTerm:  args.LastIncludedTerm,
+			CommandValid: false,
+			Command:      args.Data,
+		}
+	}()
 }
 
 func (rf *Raft) handleInstallSnapshotResponse(peerInd int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
