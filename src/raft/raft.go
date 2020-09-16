@@ -145,6 +145,10 @@ type Raft struct {
 //
 func (rf *Raft) getLogsByRange(start, end int) []entry {
 	start = start - rf.lastIncludedIndex
+	if start < 0 || start >= end {
+		return []entry{}
+	}
+
 	returnLogs := make([]entry, end-start)
 	copy(returnLogs, rf.logs[start:end])
 
@@ -709,6 +713,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.FailTerm = failTerm
 		reply.FirstIndexOfFailTerm = firstIndexOfFailTerm + rf.lastIncludedIndex
 
+		// prevent leader from sending same snapshot
+		if reply.FirstIndexOfFailTerm == rf.lastIncludedIndex {
+			reply.FirstIndexOfFailTerm++
+		}
+
 		return
 	}
 
@@ -893,9 +902,6 @@ func (rf *Raft) handleInstallSnapshotResponse(peerInd int, args *InstallSnapshot
 
 	if rf.matchIndex[peerInd] < rf.lastIncludedIndex {
 		rf.matchIndex[peerInd] = rf.lastIncludedIndex
-	}
-
-	if rf.nextIndex[peerInd] < rf.lastIncludedIndex+1 {
 		rf.nextIndex[peerInd] = rf.lastIncludedIndex + 1
 	}
 }

@@ -510,14 +510,14 @@ func (kv *KVServer) processApplyMsg(msg raft.ApplyMsg) {
 		}
 
 		kv.snapshot(msg.IndexInLog, msg.CommandIndex, msg.CommandTerm)
+
 	case raft.SnapshotEntry:
 		kv.restoreStateFromSnapshot(msg)
+
 	case raft.TermEntry:
 		if int64(msg.CommandTerm) > kv.getAppliedTerm() {
 			kv.updateAppliedTerm(int64(msg.CommandTerm))
 		}
-
-		break
 	}
 }
 
