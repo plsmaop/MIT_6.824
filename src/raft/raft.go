@@ -858,13 +858,15 @@ func (rf *Raft) startInstallSnapshot(peerInd int, args InstallSnapshotArgs) {
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	rf.printf("%d received installsnap msg from %d: %v", rf.me, args.LeaderID, args)
 	rf.updateTerm(args.Term)
 	reply.Term = rf.currentTerm
 
 	if args.Term < rf.currentTerm {
 		rf.printf("%d reject snapshot %v", rf.me, args)
-		rf.mu.Unlock()
+
 		return
 	}
 
@@ -872,30 +874,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.electionTimeout = rf.newTimeout()
 	if args.LastIncludedIndex <= rf.lastIncludedIndex || args.LastIncludedIndex <= rf.commitIndex {
 		rf.printf("%d no need to install snapshot %v", rf.me, args)
-		rf.mu.Unlock()
 		return
 	}
 
 	rf.snapshot(args.Data, args.LastIncludedIndex, args.LastIncludedCmdInd, args.LastIncludedTerm)
 	rf.printf("%d save snapshot: %v", rf.me, args)
-
-	if rf.commitIndex < args.LastIncludedIndex {
-		rf.commitIndex = args.LastIncludedIndex
-	}
-
-	if rf.lastApplied < args.LastIncludedIndex {
-		rf.lastApplied = args.LastIncludedIndex
-	}
-	rf.mu.Unlock()
-
-	rf.applyCh <- ApplyMsg{
-		Type:         SnapshotEntry,
-		IndexInLog:   args.LastIncludedIndex,
-		CommandIndex: args.LastIncludedCmdInd,
-		CommandTerm:  args.LastIncludedTerm,
-		CommandValid: false,
-		Command:      args.Data,
-	}
 }
 
 func (rf *Raft) handleInstallSnapshotResponse(peerInd int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
@@ -1040,7 +1023,6 @@ func (rf *Raft) getCommitedEntriesToApply() []ApplyMsg {
 	defer rf.mu.Unlock()
 
 	commitIndex := rf.commitIndex
-	entriesToApply := []ApplyMsg{}
 	if rf.state == leader {
 		// leader advance commit index
 		matchIndex := make([]int, len(rf.matchIndex))
@@ -1054,6 +1036,26 @@ func (rf *Raft) getCommitedEntriesToApply() []ApplyMsg {
 		} else {
 			// advance
 			rf.commitIndex = commitIndex
+		}
+	}
+
+	entriesToApply := []ApplyMsg{}
+	if rf.lastIncludedIndex > rf.lastApplied {
+		entriesToApply = append(entriesToApply, ApplyMsg{
+			Type:         SnapshotEntry,
+			IndexInLog:   rf.lastIncludedIndex,
+			CommandIndex: rf.lastIncludedCmdInd,
+			CommandTerm:  rf.lastIncludedTerm,
+			CommandValid: false,
+			Command:      rf.persister.ReadSnapshot(),
+		})
+
+		if rf.commitIndex < rf.lastIncludedIndex {
+			rf.commitIndex = rf.lastIncludedIndex
+		}
+
+		if rf.lastApplied < rf.lastIncludedIndex {
+			rf.lastApplied = rf.lastIncludedIndex
 		}
 	}
 
@@ -1074,7 +1076,7 @@ func (rf *Raft) getCommitedEntriesToApply() []ApplyMsg {
 		rf.printf("%d entries: %v\nentries to commit: %v\n", rf.me, rf.logs, entriesToApply)
 	}
 
-	rf.lastApplied += len(entriesToApply)
+	rf.lastApplied = rf.commitIndex
 	return entriesToApply
 }
 
