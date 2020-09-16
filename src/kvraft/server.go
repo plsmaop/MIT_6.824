@@ -498,15 +498,25 @@ func (kv *KVServer) restoreStateFromSnapshot(msg raft.ApplyMsg) {
 func (kv *KVServer) processApplyMsg(msg raft.ApplyMsg) {
 	switch msg.Type {
 	case raft.StateMachineCmdEntry:
+		appliedInd := kv.getAppliedInd()
+		if appliedInd > int64(msg.CommandIndex) {
+			return
+		}
+
 		kv.apply(msg)
 		kv.updateAppliedInd(int64(msg.CommandIndex))
 		if int64(msg.CommandTerm) > kv.getAppliedTerm() {
 			kv.updateAppliedTerm(int64(msg.CommandTerm))
 		}
+
 		kv.snapshot(msg.IndexInLog, msg.CommandIndex, msg.CommandTerm)
 	case raft.SnapshotEntry:
 		kv.restoreStateFromSnapshot(msg)
 	case raft.TermEntry:
+		if int64(msg.CommandTerm) > kv.getAppliedTerm() {
+			kv.updateAppliedTerm(int64(msg.CommandTerm))
+		}
+
 		break
 	}
 }
