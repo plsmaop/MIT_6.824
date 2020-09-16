@@ -892,8 +892,11 @@ func (rf *Raft) handleInstallSnapshotResponse(peerInd int, args *InstallSnapshot
 	}
 
 	if rf.matchIndex[peerInd] < rf.lastIncludedIndex {
-		rf.nextIndex[peerInd] = rf.lastIncludedIndex + 1
 		rf.matchIndex[peerInd] = rf.lastIncludedIndex
+	}
+
+	if rf.nextIndex[peerInd] < rf.lastIncludedIndex+1 {
+		rf.nextIndex[peerInd] = rf.lastIncludedIndex + 1
 	}
 }
 
