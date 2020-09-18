@@ -416,26 +416,6 @@ func (rf *Raft) readPersist(data []byte) {
 	selfMatchIndex := lastIncludedIndex + len(rf.logs)
 	rf.matchIndex[rf.me] = selfMatchIndex
 	rf.nextIndex[rf.me] = selfMatchIndex + 1
-
-	rf.lastApplied = lastIncludedIndex
-	rf.commitIndex = lastIncludedIndex
-
-	// notify application to restore from snapshot
-	snapshot := rf.persister.ReadSnapshot()
-	if snapshot == nil || len(snapshot) < 1 {
-		return
-	}
-
-	go func() {
-		rf.applyCh <- ApplyMsg{
-			Type:         SnapshotEntry,
-			IndexInLog:   lastIncludedIndex,
-			CommandIndex: lastIncludedCmdInd,
-			CommandTerm:  lastIncludedTerm,
-			CommandValid: false,
-			Command:      snapshot,
-		}
-	}()
 }
 
 func (rf *Raft) GetPersistentSize() int {
