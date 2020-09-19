@@ -735,6 +735,8 @@ func (rf *Raft) handleAppendEntriesResponse(peerInd int, args *AppendEntriesArgs
 			rf.nextIndex[peerInd] = nextIndex
 		}
 
+		rf.matchIndex[peerInd] = rf.nextIndex[peerInd] - 1
+
 		// retry
 		shouldRetry = true
 		nextInd = rf.nextIndex[peerInd]
