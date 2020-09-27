@@ -1,5 +1,7 @@
 package shardmaster
 
+import "log"
+
 //
 // Master shard server: assigns shards to replication groups.
 //
@@ -19,6 +21,14 @@ package shardmaster
 
 // The number of shards.
 const NShards = 10
+const debug = 0
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
 
 // A configuration -- an assignment of shards to groups.
 // Please don't change this.
@@ -28,14 +38,31 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
+type Err string
+
 const (
-	OK = "OK"
+	OK   Err = "OK"
+	FAIL Err = "FAIL"
 )
 
-type Err string
+type opType string
+
+const (
+	joinType  opType = "JOIN"
+	leaveType opType = "LEAVE"
+	moveType  opType = "MOVE"
+	queryType opType = "QUERY"
+)
+
+type Header struct {
+	ClientID string
+	SeqNum   int64
+	Time     int64
+}
 
 type JoinArgs struct {
 	Servers map[int][]string // new GID -> servers mappings
+	Header
 }
 
 type JoinReply struct {
@@ -45,6 +72,7 @@ type JoinReply struct {
 
 type LeaveArgs struct {
 	GIDs []int
+	Header
 }
 
 type LeaveReply struct {
@@ -52,9 +80,14 @@ type LeaveReply struct {
 	Err         Err
 }
 
-type MoveArgs struct {
+type ShardGIDPair struct {
 	Shard int
 	GID   int
+}
+
+type MoveArgs struct {
+	ShardGIDPair
+	Header
 }
 
 type MoveReply struct {
@@ -64,10 +97,23 @@ type MoveReply struct {
 
 type QueryArgs struct {
 	Num int // desired config number
+	Header
 }
 
 type QueryReply struct {
 	WrongLeader bool
 	Err         Err
 	Config      Config
+}
+
+type Args struct {
+	Header
+	opType opType
+	value  interface{}
+}
+
+type Reply struct {
+	wrongLeader bool
+	err         Err
+	config      Config
 }
