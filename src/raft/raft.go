@@ -714,7 +714,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 
 		for ; nextIndex <= len(rf.logs) && argsEntryIndex < len(args.Entries); nextIndex++ {
-			if rf.logs[nextIndex-1].Term != args.Entries[argsEntryIndex].Term || rf.logs[nextIndex-1].Command != args.Entries[argsEntryIndex].Command {
+			if rf.logs[nextIndex-1].Term != args.Entries[argsEntryIndex].Term {
 				break
 			}
 			argsEntryIndex++
@@ -1001,6 +1001,8 @@ func (rf *Raft) getAppendEntriesTaskArgs(now time.Time) []appendEntriesTaskArgs 
 					PrevLogTerm:       prevLogTerm,
 				},
 			})
+
+			rf.printf("%v Send entries %v to %v", rf.me, entries, ind)
 		}
 	}
 
@@ -1164,6 +1166,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 
+	rf.printf("%v Raft Start: %v", rf.me, command)
 	term := rf.currentTerm
 	cmdInd := rf.getNextCmdIndex()
 	rf.appendLogs(entry{
@@ -1229,7 +1232,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		state:       follower,
 
 		receivedVote:  0,
-		appendChan:    make(chan appendEntriesTaskArgs, len(peers)),
+		appendChan:    make(chan appendEntriesTaskArgs, len(peers)*workerNum),
 		currentLeader: -1,
 	}
 	rf.electionTimeout = rf.newTimeout()
