@@ -4,14 +4,32 @@ package shardmaster
 // Shardmaster clerk.
 //
 
-import "../labrpc"
-import "time"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"fmt"
+	"log"
+	"math/big"
+	"sync/atomic"
+	"time"
+
+	"../labrpc"
+)
+
+const (
+	reqTimeout   = 2 * time.Second
+	receiver     = "ShardMaster"
+	queryRPCName = receiver + ".Query"
+	joinRPCName  = receiver + ".Join"
+	leaveRPCName = receiver + ".Leave"
+	movePCName   = receiver + ".Move"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	id            string
+	currentLeader int64
+	seqNumber     int64
 }
 
 func nrand() int64 {
@@ -21,81 +39,159 @@ func nrand() int64 {
 	return x
 }
 
+func (ck *Clerk) getSeqNum() int64 {
+	return atomic.AddInt64(&ck.seqNumber, 1)
+}
+
+func (ck *Clerk) setCurLeader(leader int64) {
+	ck.printf("Set leader to %v", leader)
+	atomic.StoreInt64(&ck.currentLeader, leader)
+}
+
+func (ck *Clerk) getCurLeader() int64 {
+	return atomic.LoadInt64(&ck.currentLeader)
+}
+
+func (ck *Clerk) printf(format string, a ...interface{}) {
+	if debug > 0 {
+		a = append([]interface{}{ck.id}, a...)
+		log.Printf("%v "+format, a...)
+	}
+}
+
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
-	ck := new(Clerk)
-	ck.servers = servers
+	ck := &Clerk{
+		servers:       servers,
+		currentLeader: int64(nrand()) % int64(len(servers)),
+		id:            fmt.Sprintf("%v", nrand()),
+		seqNumber:     0,
+	}
 	// Your code here.
 	return ck
 }
 
+func (ck *Clerk) send(leader int64, rpcName string, args interface{}, reply interface{}) bool {
+	doneChan := make(chan bool)
+	go func() {
+		doneChan <- ck.servers[leader].Call(rpcName, args, reply)
+		close(doneChan)
+	}()
+
+	select {
+	case <-time.After(reqTimeout):
+		return false
+	case ok := <-doneChan:
+		return ok
+	}
+}
+
 func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{}
+	args := &QueryArgs{
+		Header: Header{
+			ClientID: ck.id,
+			SeqNum:   int64(ck.getSeqNum()),
+		},
+		Num: num,
+	}
 	// Your code here.
-	args.Num = num
 	for {
 		// try each known server.
-		for _, srv := range ck.servers {
+		curLeader := ck.getCurLeader()
+		for i := 0; i < len(ck.servers); i++ {
+			srv := (curLeader + int64(i)) % int64(len(ck.servers))
+
 			var reply QueryReply
-			ok := srv.Call("ShardMaster.Query", args, &reply)
+			ok := ck.send(int64(srv), queryRPCName, args, &reply)
 			if ok && reply.WrongLeader == false {
+				ck.setCurLeader(int64(srv))
 				return reply.Config
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		// time.Sleep(100 * time.Millisecond)
 	}
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
+	args := &JoinArgs{
+		Header: Header{
+			ClientID: ck.id,
+			SeqNum:   int64(ck.getSeqNum()),
+		},
+		Servers: servers,
+	}
 	// Your code here.
-	args.Servers = servers
 
 	for {
 		// try each known server.
-		for _, srv := range ck.servers {
+		curLeader := ck.getCurLeader()
+		for i := 0; i < len(ck.servers); i++ {
+			srv := (curLeader + int64(i)) % int64(len(ck.servers))
+
 			var reply JoinReply
-			ok := srv.Call("ShardMaster.Join", args, &reply)
+			ok := ck.send(int64(srv), joinRPCName, args, &reply)
 			if ok && reply.WrongLeader == false {
+				ck.setCurLeader(int64(srv))
 				return
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		// time.Sleep(100 * time.Millisecond)
 	}
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
+	args := &LeaveArgs{
+		Header: Header{
+			ClientID: ck.id,
+			SeqNum:   int64(ck.getSeqNum()),
+		},
+		GIDs: gids,
+	}
 	// Your code here.
-	args.GIDs = gids
 
 	for {
 		// try each known server.
-		for _, srv := range ck.servers {
+		curLeader := ck.getCurLeader()
+		for i := 0; i < len(ck.servers); i++ {
+			srv := (curLeader + int64(i)) % int64(len(ck.servers))
+
 			var reply LeaveReply
-			ok := srv.Call("ShardMaster.Leave", args, &reply)
+			ok := ck.send(int64(srv), leaveRPCName, args, &reply)
 			if ok && reply.WrongLeader == false {
+				ck.setCurLeader(int64(srv))
 				return
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		// time.Sleep(100 * time.Millisecond)
 	}
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
+	args := &MoveArgs{
+		Header: Header{
+			ClientID: ck.id,
+			SeqNum:   int64(ck.getSeqNum()),
+		},
+		ShardGIDPair: ShardGIDPair{
+			Shard: shard,
+			GID:   gid,
+		},
+	}
 	// Your code here.
-	args.Shard = shard
-	args.GID = gid
 
 	for {
 		// try each known server.
-		for _, srv := range ck.servers {
+		curLeader := ck.getCurLeader()
+		for i := 0; i < len(ck.servers); i++ {
+			srv := (curLeader + int64(i)) % int64(len(ck.servers))
+
 			var reply MoveReply
-			ok := srv.Call("ShardMaster.Move", args, &reply)
+			ok := ck.send(int64(srv), movePCName, args, &reply)
 			if ok && reply.WrongLeader == false {
+				ck.setCurLeader(int64(srv))
 				return
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+
+		// time.Sleep(100 * time.Millisecond)
 	}
 }

@@ -299,13 +299,18 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	seqNum := args.SeqNum
 
 	r := &Reply{}
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	e.Encode(args.GIDs)
+	data := w.Bytes()
 	ind, ok := sm.startRequest(&Args{
 		Header: Header{
 			ClientID: cID,
 			SeqNum:   seqNum,
 		},
 		opType: leaveType,
-		value:  args.GIDs,
+		value:  data,
 	}, r)
 	if !ok {
 		// request is handled or stale
@@ -346,13 +351,18 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	seqNum := args.SeqNum
 
 	r := &Reply{}
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	e.Encode(args.ShardGIDPair)
+	data := w.Bytes()
 	ind, ok := sm.startRequest(&Args{
 		Header: Header{
 			ClientID: cID,
 			SeqNum:   seqNum,
 		},
 		opType: moveType,
-		value:  args.ShardGIDPair,
+		value:  data,
 	}, r)
 	if !ok {
 		// request is handled or stale
@@ -450,6 +460,7 @@ func (sm *ShardMaster) appendJobWrapper(j job) func(interface{}) interface{} {
 }
 
 func (sm *ShardMaster) applyJoin(servers map[int][]string) {
+
 	c := sm.configs[len(sm.configs)-1]
 	newG := map[int][]string{}
 
@@ -461,44 +472,70 @@ func (sm *ShardMaster) applyJoin(servers map[int][]string) {
 		newG[id] = members
 	}
 
+	sm.printf("join old shards: %v", c.Shards)
 	oldGIDToShards := map[int][]int{}
 	for shard, gid := range c.Shards {
 		oldGIDToShards[gid] = append(oldGIDToShards[gid], shard)
 	}
-
 	shardsShouldMove := oldGIDToShards[0]
 	delete(oldGIDToShards, 0)
 
 	maxShardNumPerGroup := int64(math.Ceil(float64(NShards) / float64(len(newG))))
 	minShardNumPerGroup := int64(math.Floor(float64(NShards) / float64(len(newG))))
-	allocatedShards := int64(0)
+	allocatedShards := int64(len(servers)) * minShardNumPerGroup
+
+	// add all minShardNumPerGroup first
+	for _, shards := range oldGIDToShards {
+		if int64(len(shards)) > minShardNumPerGroup {
+			continue
+		}
+
+		allocatedShards += int64(len(shards))
+	}
+
+	existedGroupWithoutEnoughShards := []int{}
 	for gid, shards := range oldGIDToShards {
 		if int64(len(shards)) <= minShardNumPerGroup {
 			allocatedShards += int64(len(shards))
-			continue
-		}
 
-		if int64(len(shards)) == maxShardNumPerGroup {
-			if allocatedShards+int64(len(shards)) <= int64(NShards) {
-				allocatedShards += int64(len(shards))
-				continue
+			if int64(len(shards)) < minShardNumPerGroup {
+				existedGroupWithoutEnoughShards = append(existedGroupWithoutEnoughShards, gid)
 			}
 
-			shardsShouldMove = append(shardsShouldMove, shards[minShardNumPerGroup:]...)
-			oldGIDToShards[gid] = shards[:minShardNumPerGroup]
-			allocatedShards += int64(len(oldGIDToShards[gid]))
 			continue
 		}
 
-		shardsShouldMove = append(shardsShouldMove, shards[maxShardNumPerGroup:]...)
-		oldGIDToShards[gid] = shards[:maxShardNumPerGroup]
+		if allocatedShards+maxShardNumPerGroup <= int64(NShards) {
+			shardsShouldMove = append(shardsShouldMove, shards[maxShardNumPerGroup:]...)
+			oldGIDToShards[gid] = shards[:maxShardNumPerGroup]
+			allocatedShards += maxShardNumPerGroup
+			continue
+		}
+
+		shardsShouldMove = append(shardsShouldMove, shards[minShardNumPerGroup:]...)
+		oldGIDToShards[gid] = shards[:minShardNumPerGroup]
 		allocatedShards += int64(len(oldGIDToShards[gid]))
 	}
 
+	for _, gid := range existedGroupWithoutEnoughShards {
+		shardNum := int64(len(oldGIDToShards[gid]))
+		oldGIDToShards[gid] = append(oldGIDToShards[gid], shardsShouldMove[:minShardNumPerGroup-shardNum]...)
+		shardsShouldMove = shardsShouldMove[minShardNumPerGroup-shardNum:]
+	}
+
+	sm.printf("NShards: %v, old group number: %v, new group number: %v, min: %v, max: %v, Shards to be moved: %v", NShards, len(c.Groups), len(newG), minShardNumPerGroup, maxShardNumPerGroup, shardsShouldMove)
+
+	shardInd := 0
 	newGIDToShards := map[int][]int{}
-	for gid := range servers {
-		newGIDToShards[gid] = shardsShouldMove[:minShardNumPerGroup]
-		shardsShouldMove = shardsShouldMove[minShardNumPerGroup:]
+	for shardInd < len(shardsShouldMove) {
+		for gid := range servers {
+			if shardInd >= len(shardsShouldMove) {
+				break
+			}
+
+			newGIDToShards[gid] = append(newGIDToShards[gid], shardsShouldMove[shardInd])
+			shardInd++
+		}
 	}
 
 	newConfig := Config{
@@ -518,6 +555,8 @@ func (sm *ShardMaster) applyJoin(servers map[int][]string) {
 		}
 	}
 
+	sm.printf("join oldGIDToShards: %v", oldGIDToShards)
+	sm.printf("join newGIDToShards: %v", newGIDToShards)
 	sm.configs = append(sm.configs, newConfig)
 }
 
@@ -534,6 +573,7 @@ func (sm *ShardMaster) applyLeave(gids []int) {
 		GIDToShards[gid] = append(GIDToShards[gid], shard)
 	}
 
+	sm.printf("GIDToShards and shards: %v %v", GIDToShards, c.Shards)
 	shardsShouldMove := []int{}
 	for _, gid := range gids {
 		shardsShouldMove = append(shardsShouldMove, GIDToShards[gid]...)
@@ -541,11 +581,24 @@ func (sm *ShardMaster) applyLeave(gids []int) {
 		delete(GIDToShards, gid)
 	}
 
+	if len(newG) == 0 {
+		newG[0] = []string{}
+	}
+
+	sm.printf("GIDToShards: %v", GIDToShards)
+
 	shardInd := 0
+	maxShardNumPerGroup := int64(math.Ceil(float64(NShards) / float64(len(newG))))
+	sm.printf("newG: %v", newG)
+	sm.printf("leave len(G): %v, maxShardNumPerGroup: %v", len(newG), maxShardNumPerGroup)
 	for shardInd < len(shardsShouldMove) {
-		for gid := range GIDToShards {
+		for gid := range newG {
 			if shardInd >= len(shardsShouldMove) {
 				break
+			}
+
+			if int64(len(GIDToShards[gid])) == maxShardNumPerGroup {
+				continue
 			}
 
 			GIDToShards[gid] = append(GIDToShards[gid], shardsShouldMove[shardInd])
@@ -553,6 +606,7 @@ func (sm *ShardMaster) applyLeave(gids []int) {
 		}
 	}
 
+	delete(newG, 0)
 	newConfig := Config{
 		Groups: newG,
 		Num:    c.Num + 1,
@@ -619,11 +673,29 @@ func (sm *ShardMaster) apply(msg raft.ApplyMsg) {
 			sm.applyJoin(servers)
 			cmd.Value = servers
 		case leaveType:
-			gids, _ := cmd.Value.([]int)
+			val, _ := cmd.Value.([]byte)
+
+			r := bytes.NewBuffer(val)
+			d := labgob.NewDecoder(r)
+			var gids []int
+			if d.Decode(&gids) != nil {
+				log.Fatalf("%d decode leave gid slice error", sm.me)
+			}
+
 			sm.applyLeave(gids)
+			cmd.Value = gids
 		case moveType:
-			pair, _ := cmd.Value.(ShardGIDPair)
+			val, _ := cmd.Value.([]byte)
+
+			r := bytes.NewBuffer(val)
+			d := labgob.NewDecoder(r)
+			var pair ShardGIDPair
+			if d.Decode(&pair) != nil {
+				log.Fatalf("%d decode move pair error", sm.me)
+			}
+
 			sm.applyMove(pair)
+			cmd.Value = pair
 		default:
 			log.Printf("Invalid cmd type: %v, discard\n", cmd.Type)
 			return
