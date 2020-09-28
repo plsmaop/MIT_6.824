@@ -219,12 +219,15 @@ func (sm *ShardMaster) startRequest(args *Args, reply *Reply) (raftLogInd int, s
 		}
 	}
 
-	ind, _, ok := sm.rf.Start(Op{
+	cmd := Op{
 		Type:     args.opType,
 		Value:    args.value,
 		ClientID: cID,
 		SeqNum:   seqNum,
-	})
+	}
+
+	sm.printf("Start: %v", cmd)
+	ind, _, ok := sm.rf.Start(cmd)
 
 	if !ok {
 		reply.wrongLeader = true
@@ -238,18 +241,24 @@ func (sm *ShardMaster) startRequest(args *Args, reply *Reply) (raftLogInd int, s
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
-	sm.printf("get args: %v, reply: %v", args, reply)
+	sm.printf("join args: %v, reply: %v", args, reply)
 	cID := args.ClientID
 	seqNum := args.SeqNum
 
 	r := &Reply{}
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	e.Encode(args.Servers)
+	data := w.Bytes()
+
 	ind, ok := sm.startRequest(&Args{
 		Header: Header{
 			ClientID: cID,
 			SeqNum:   seqNum,
 		},
 		opType: joinType,
-		value:  args.Servers,
+		value:  data,
 	}, r)
 	if !ok {
 		// request is handled or stale
@@ -285,7 +294,7 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
-	sm.printf("get args: %v, reply: %v", args, reply)
+	sm.printf("leave args: %v, reply: %v", args, reply)
 	cID := args.ClientID
 	seqNum := args.SeqNum
 
@@ -332,7 +341,7 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
-	sm.printf("get args: %v, reply: %v", args, reply)
+	sm.printf("move args: %v, reply: %v", args, reply)
 	cID := args.ClientID
 	seqNum := args.SeqNum
 
@@ -379,7 +388,7 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
-	sm.printf("get args: %v, reply: %v", args, reply)
+	sm.printf("query args: %v, reply: %v", args, reply)
 	cID := args.ClientID
 	seqNum := args.SeqNum
 
@@ -593,12 +602,22 @@ func (sm *ShardMaster) apply(msg raft.ApplyMsg) {
 			num, _ := cmd.Value.(int)
 			if num == -1 || num >= len(sm.configs) {
 				cmd.Value = sm.configs[len(sm.configs)-1]
+				break
 			}
 
 			cmd.Value = sm.configs[num]
 		case joinType:
-			servers, _ := cmd.Value.(map[int][]string)
+			val, _ := cmd.Value.([]byte)
+
+			r := bytes.NewBuffer(val)
+			d := labgob.NewDecoder(r)
+			var servers map[int][]string
+			if d.Decode(&servers) != nil {
+				log.Fatalf("%d decode join map error", sm.me)
+			}
+
 			sm.applyJoin(servers)
+			cmd.Value = servers
 		case leaveType:
 			gids, _ := cmd.Value.([]int)
 			sm.applyLeave(gids)
