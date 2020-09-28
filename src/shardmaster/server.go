@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -451,8 +452,57 @@ func (sm *ShardMaster) applyJoin(servers map[int][]string) {
 		newG[id] = members
 	}
 
-	shardNumPerGroup := int(NShards / len(newG))
+	oldGIDToShards := map[int][]int{}
+	for shard, gid := range c.Shards {
+		oldGIDToShards[gid] = append(oldGIDToShards[gid], shard)
+	}
 
+	shardsShouldMove := oldGIDToShards[0]
+	delete(oldGIDToShards, 0)
+
+	maxShardNumPerGroup := int64(math.Ceil(float64(NShards) / float64(len(newG))))
+	minShardNumPerGroup := int64(math.Floor(float64(NShards) / float64(len(newG))))
+	allocatedShards := int64(0)
+	for gid, shards := range oldGIDToShards {
+		if int64(len(shards)) <= minShardNumPerGroup {
+			allocatedShards += int64(len(shards))
+			continue
+		}
+
+		if int64(len(shards)) == maxShardNumPerGroup && allocatedShards+int64(len(shards)) <= int64(NShards) {
+			allocatedShards += int64(len(shards))
+			continue
+		}
+
+		shardsShouldMove = append(shardsShouldMove, shards[maxShardNumPerGroup:]...)
+		oldGIDToShards[gid] = shards[:maxShardNumPerGroup]
+		allocatedShards += int64(len(oldGIDToShards[gid]))
+	}
+
+	newGIDToShards := map[int][]int{}
+	for gid := range servers {
+		newGIDToShards[gid] = shardsShouldMove[:minShardNumPerGroup]
+		shardsShouldMove = shardsShouldMove[minShardNumPerGroup:]
+	}
+
+	newConfig := Config{
+		Groups: newG,
+		Num:    c.Num + 1,
+	}
+
+	for gid, shards := range oldGIDToShards {
+		for _, shard := range shards {
+			newConfig.Shards[shard] = gid
+		}
+	}
+
+	for gid, shards := range newGIDToShards {
+		for _, shard := range shards {
+			newConfig.Shards[shard] = gid
+		}
+	}
+
+	sm.configs = append(sm.configs, newConfig)
 }
 
 func (sm *ShardMaster) applyLeave(gids []int) {
@@ -463,11 +513,42 @@ func (sm *ShardMaster) applyLeave(gids []int) {
 		newG[id] = members
 	}
 
-	for _, gid := range gids {
-		delete(newG, gid)
+	GIDToShards := map[int][]int{}
+	for shard, gid := range c.Shards {
+		GIDToShards[gid] = append(GIDToShards[gid], shard)
 	}
 
-	shardNumPerGroup := int(NShards / len(newG))
+	shardsShouldMove := []int{}
+	for _, gid := range gids {
+		shardsShouldMove = append(shardsShouldMove, GIDToShards[gid]...)
+		delete(newG, gid)
+		delete(GIDToShards, gid)
+	}
+
+	shardInd := 0
+	for shardInd < len(shardsShouldMove) {
+		for gid := range GIDToShards {
+			if shardInd >= len(shardsShouldMove) {
+				break
+			}
+
+			GIDToShards[gid] = append(GIDToShards[gid], shardsShouldMove[shardInd])
+			shardInd++
+		}
+	}
+
+	newConfig := Config{
+		Groups: newG,
+		Num:    c.Num + 1,
+	}
+
+	for gid, shards := range GIDToShards {
+		for _, shard := range shards {
+			newConfig.Shards[shard] = gid
+		}
+	}
+
+	sm.configs = append(sm.configs, newConfig)
 }
 
 func (sm *ShardMaster) applyMove(pair ShardGIDPair) {
