@@ -469,8 +469,15 @@ func (sm *ShardMaster) applyJoin(servers map[int][]string) {
 			continue
 		}
 
-		if int64(len(shards)) == maxShardNumPerGroup && allocatedShards+int64(len(shards)) <= int64(NShards) {
-			allocatedShards += int64(len(shards))
+		if int64(len(shards)) == maxShardNumPerGroup {
+			if allocatedShards+int64(len(shards)) <= int64(NShards) {
+				allocatedShards += int64(len(shards))
+				continue
+			}
+
+			shardsShouldMove = append(shardsShouldMove, shards[minShardNumPerGroup:]...)
+			oldGIDToShards[gid] = shards[:minShardNumPerGroup]
+			allocatedShards += int64(len(oldGIDToShards[gid]))
 			continue
 		}
 
