@@ -459,6 +459,83 @@ func (sm *ShardMaster) appendJobWrapper(j job) func(interface{}) interface{} {
 	}
 }
 
+func (sm *ShardMaster) balance(newG map[int][]string, gidToShards map[int][]int, unallocatedShards []int) [NShards]int {
+	groupsWithoutEnoughShards := []int{}
+	groupsWithTooManyShards := []int{}
+
+	maxShardNumPerGroup := int64(math.Ceil(float64(NShards) / float64(len(newG))))
+	minShardNumPerGroup := int64(math.Floor(float64(NShards) / float64(len(newG))))
+	allocatedShards := int64(0)
+	shardsShouldMove := unallocatedShards
+	for gid := range newG {
+		shards := gidToShards[gid]
+		shardNum := int64(len(shards))
+
+		if shardNum > minShardNumPerGroup {
+			groupsWithTooManyShards = append(groupsWithTooManyShards, gid)
+			allocatedShards += maxShardNumPerGroup
+
+			if shardNum > maxShardNumPerGroup {
+				shardsShouldMove = append(shardsShouldMove, shards[maxShardNumPerGroup:]...)
+				gidToShards[gid] = shards[:maxShardNumPerGroup]
+			}
+
+			continue
+		}
+
+		if shardNum < minShardNumPerGroup {
+			groupsWithoutEnoughShards = append(groupsWithoutEnoughShards, gid)
+		}
+
+		allocatedShards += minShardNumPerGroup
+	}
+
+	for _, gid := range groupsWithTooManyShards {
+		if allocatedShards == NShards {
+			break
+		}
+
+		shards := gidToShards[gid]
+		shardsShouldMove = append(shardsShouldMove, shards[minShardNumPerGroup:]...)
+		gidToShards[gid] = shards[:minShardNumPerGroup]
+		allocatedShards--
+	}
+
+	sm.printf("shardsShouldMove: %v", shardsShouldMove)
+	for _, gid := range groupsWithoutEnoughShards {
+		shardNum := int64(len(gidToShards[gid]))
+		gidToShards[gid] = append(gidToShards[gid], shardsShouldMove[:minShardNumPerGroup-shardNum]...)
+		shardsShouldMove = shardsShouldMove[minShardNumPerGroup-shardNum:]
+	}
+
+	sm.printf("NShards: %v, new group number: %v, min: %v, max: %v, Shards to be moved: %v", NShards, len(newG), minShardNumPerGroup, maxShardNumPerGroup, shardsShouldMove)
+
+	shardInd := 0
+	for shardInd < len(shardsShouldMove) {
+		for gid := range newG {
+			if shardInd >= len(shardsShouldMove) {
+				break
+			}
+
+			if int64(len(gidToShards[gid])) >= maxShardNumPerGroup {
+				continue
+			}
+
+			gidToShards[gid] = append(gidToShards[gid], shardsShouldMove[shardInd])
+			shardInd++
+		}
+	}
+
+	var newShards [NShards]int
+	for gid, shards := range gidToShards {
+		for _, shard := range shards {
+			newShards[shard] = gid
+		}
+	}
+
+	return newShards
+}
+
 func (sm *ShardMaster) applyJoin(servers map[int][]string) {
 
 	c := sm.configs[len(sm.configs)-1]
@@ -473,90 +550,21 @@ func (sm *ShardMaster) applyJoin(servers map[int][]string) {
 	}
 
 	sm.printf("join old shards: %v", c.Shards)
-	oldGIDToShards := map[int][]int{}
+	gidToShards := map[int][]int{}
 	for shard, gid := range c.Shards {
-		oldGIDToShards[gid] = append(oldGIDToShards[gid], shard)
+		gidToShards[gid] = append(gidToShards[gid], shard)
 	}
-	shardsShouldMove := oldGIDToShards[0]
-	delete(oldGIDToShards, 0)
-
-	maxShardNumPerGroup := int64(math.Ceil(float64(NShards) / float64(len(newG))))
-	minShardNumPerGroup := int64(math.Floor(float64(NShards) / float64(len(newG))))
-	allocatedShards := int64(len(servers)) * minShardNumPerGroup
-
-	// add all minShardNumPerGroup first
-	for _, shards := range oldGIDToShards {
-		if int64(len(shards)) > minShardNumPerGroup {
-			continue
-		}
-
-		allocatedShards += int64(len(shards))
-	}
-
-	existedGroupWithoutEnoughShards := []int{}
-	for gid, shards := range oldGIDToShards {
-		if int64(len(shards)) <= minShardNumPerGroup {
-			allocatedShards += int64(len(shards))
-
-			if int64(len(shards)) < minShardNumPerGroup {
-				existedGroupWithoutEnoughShards = append(existedGroupWithoutEnoughShards, gid)
-			}
-
-			continue
-		}
-
-		if allocatedShards+maxShardNumPerGroup <= int64(NShards) {
-			shardsShouldMove = append(shardsShouldMove, shards[maxShardNumPerGroup:]...)
-			oldGIDToShards[gid] = shards[:maxShardNumPerGroup]
-			allocatedShards += maxShardNumPerGroup
-			continue
-		}
-
-		shardsShouldMove = append(shardsShouldMove, shards[minShardNumPerGroup:]...)
-		oldGIDToShards[gid] = shards[:minShardNumPerGroup]
-		allocatedShards += int64(len(oldGIDToShards[gid]))
-	}
-
-	for _, gid := range existedGroupWithoutEnoughShards {
-		shardNum := int64(len(oldGIDToShards[gid]))
-		oldGIDToShards[gid] = append(oldGIDToShards[gid], shardsShouldMove[:minShardNumPerGroup-shardNum]...)
-		shardsShouldMove = shardsShouldMove[minShardNumPerGroup-shardNum:]
-	}
-
-	sm.printf("NShards: %v, old group number: %v, new group number: %v, min: %v, max: %v, Shards to be moved: %v", NShards, len(c.Groups), len(newG), minShardNumPerGroup, maxShardNumPerGroup, shardsShouldMove)
-
-	shardInd := 0
-	newGIDToShards := map[int][]int{}
-	for shardInd < len(shardsShouldMove) {
-		for gid := range servers {
-			if shardInd >= len(shardsShouldMove) {
-				break
-			}
-
-			newGIDToShards[gid] = append(newGIDToShards[gid], shardsShouldMove[shardInd])
-			shardInd++
-		}
-	}
+	shardsShouldMove := gidToShards[0]
+	delete(gidToShards, 0)
+	newShards := sm.balance(newG, gidToShards, shardsShouldMove)
 
 	newConfig := Config{
 		Groups: newG,
 		Num:    c.Num + 1,
+		Shards: newShards,
 	}
 
-	for gid, shards := range oldGIDToShards {
-		for _, shard := range shards {
-			newConfig.Shards[shard] = gid
-		}
-	}
-
-	for gid, shards := range newGIDToShards {
-		for _, shard := range shards {
-			newConfig.Shards[shard] = gid
-		}
-	}
-
-	sm.printf("join oldGIDToShards: %v", oldGIDToShards)
-	sm.printf("join newGIDToShards: %v", newGIDToShards)
+	sm.printf("join gidToShards: %v", gidToShards)
 	sm.configs = append(sm.configs, newConfig)
 }
 
@@ -586,36 +594,13 @@ func (sm *ShardMaster) applyLeave(gids []int) {
 	}
 
 	sm.printf("GIDToShards: %v", GIDToShards)
-
-	shardInd := 0
-	maxShardNumPerGroup := int64(math.Ceil(float64(NShards) / float64(len(newG))))
-	sm.printf("newG: %v", newG)
-	sm.printf("leave len(G): %v, maxShardNumPerGroup: %v", len(newG), maxShardNumPerGroup)
-	for shardInd < len(shardsShouldMove) {
-		for gid := range newG {
-			if shardInd >= len(shardsShouldMove) {
-				break
-			}
-
-			if int64(len(GIDToShards[gid])) == maxShardNumPerGroup {
-				continue
-			}
-
-			GIDToShards[gid] = append(GIDToShards[gid], shardsShouldMove[shardInd])
-			shardInd++
-		}
-	}
+	newShards := sm.balance(newG, GIDToShards, shardsShouldMove)
 
 	delete(newG, 0)
 	newConfig := Config{
 		Groups: newG,
 		Num:    c.Num + 1,
-	}
-
-	for gid, shards := range GIDToShards {
-		for _, shard := range shards {
-			newConfig.Shards[shard] = gid
-		}
+		Shards: newShards,
 	}
 
 	sm.configs = append(sm.configs, newConfig)
