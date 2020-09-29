@@ -102,7 +102,7 @@ func (ck *Clerk) Query(num int) Config {
 
 			var reply QueryReply
 			ok := ck.send(int64(srv), queryRPCName, args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && reply.WrongLeader == false && reply.Err == OK {
 				ck.setCurLeader(int64(srv))
 				return reply.Config
 			}
@@ -129,7 +129,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 
 			var reply JoinReply
 			ok := ck.send(int64(srv), joinRPCName, args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && reply.WrongLeader == false && reply.Err == OK {
 				ck.setCurLeader(int64(srv))
 				return
 			}
@@ -156,7 +156,7 @@ func (ck *Clerk) Leave(gids []int) {
 
 			var reply LeaveReply
 			ok := ck.send(int64(srv), leaveRPCName, args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && reply.WrongLeader == false && reply.Err == OK {
 				ck.setCurLeader(int64(srv))
 				return
 			}
@@ -186,7 +186,7 @@ func (ck *Clerk) Move(shard int, gid int) {
 
 			var reply MoveReply
 			ok := ck.send(int64(srv), movePCName, args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && reply.WrongLeader == false && reply.Err == OK {
 				ck.setCurLeader(int64(srv))
 				return
 			}
