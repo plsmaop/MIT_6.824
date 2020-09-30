@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -75,7 +76,7 @@ func (kvs *KVStore) Replace(newData map[string]interface{}) {
 }
 
 type ShardMaster struct {
-	mu           sync.Mutex
+	mu           sync.RWMutex
 	me           int
 	rf           *raft.Raft
 	applyCh      chan raft.ApplyMsg
@@ -189,6 +190,29 @@ func (sm *ShardMaster) installClientTable(ct map[string]client) {
 	}
 
 	sm.printf("installing client table: %v", sm.clientTable)
+}
+
+func (sm *ShardMaster) getConfigByInd(ind int) Config {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if ind == lastConfigInd || ind >= len(sm.configs) {
+		ind = len(sm.configs) - 1
+	}
+
+	tmp := sm.configs[ind]
+	c := Config{
+		Groups: map[int][]string{},
+	}
+
+	c.Num = tmp.Num
+	c.Shards = tmp.Shards
+	for gid, members := range tmp.Groups {
+		c.Groups[gid] = make([]string, len(members))
+		copy(c.Groups[gid], members)
+	}
+
+	return c
 }
 
 func (sm *ShardMaster) startRequest(args *Args, reply *Reply) (raftLogInd int, success bool) {
@@ -490,6 +514,10 @@ func (sm *ShardMaster) balance(newG map[int][]string, gidToShards map[int][]int,
 		allocatedShards += minShardNumPerGroup
 	}
 
+	sort.Ints(groupsWithoutEnoughShards)
+	sort.Ints(groupsWithTooManyShards)
+	sort.Ints(shardsShouldMove)
+
 	for _, gid := range groupsWithTooManyShards {
 		if allocatedShards == NShards {
 			break
@@ -510,9 +538,15 @@ func (sm *ShardMaster) balance(newG map[int][]string, gidToShards map[int][]int,
 
 	sm.printf("NShards: %v, new group number: %v, min: %v, max: %v, Shards to be moved: %v", NShards, len(newG), minShardNumPerGroup, maxShardNumPerGroup, shardsShouldMove)
 
+	newGroupsArray := []int{}
+	for gid := range newG {
+		newGroupsArray = append(newGroupsArray, gid)
+	}
+	sort.Ints(newGroupsArray)
+
 	shardInd := 0
 	for shardInd < len(shardsShouldMove) {
-		for gid := range newG {
+		for _, gid := range newGroupsArray {
 			if shardInd >= len(shardsShouldMove) {
 				break
 			}
@@ -537,8 +571,7 @@ func (sm *ShardMaster) balance(newG map[int][]string, gidToShards map[int][]int,
 }
 
 func (sm *ShardMaster) applyJoin(servers map[int][]string) {
-
-	c := sm.configs[len(sm.configs)-1]
+	c := sm.getConfigByInd(lastConfigInd)
 	newG := map[int][]string{}
 
 	for id, members := range c.Groups {
@@ -564,12 +597,12 @@ func (sm *ShardMaster) applyJoin(servers map[int][]string) {
 		Shards: newShards,
 	}
 
-	sm.printf("join gidToShards: %v", gidToShards)
+	sm.printf("join Config: %v", newConfig)
 	sm.configs = append(sm.configs, newConfig)
 }
 
 func (sm *ShardMaster) applyLeave(gids []int) {
-	c := sm.configs[len(sm.configs)-1]
+	c := sm.getConfigByInd(lastConfigInd)
 	newG := map[int][]string{}
 
 	for id, members := range c.Groups {
@@ -607,7 +640,7 @@ func (sm *ShardMaster) applyLeave(gids []int) {
 }
 
 func (sm *ShardMaster) applyMove(pair ShardGIDPair) {
-	c := sm.configs[len(sm.configs)-1]
+	c := sm.getConfigByInd(lastConfigInd)
 
 	var newShards [NShards]int
 	for shard, gid := range c.Shards {
@@ -639,12 +672,7 @@ func (sm *ShardMaster) apply(msg raft.ApplyMsg) {
 			}
 
 			num, _ := cmd.Value.(int)
-			if num == -1 || num >= len(sm.configs) {
-				cmd.Value = sm.configs[len(sm.configs)-1]
-				break
-			}
-
-			cmd.Value = sm.configs[num]
+			cmd.Value = sm.getConfigByInd(num)
 		case joinType:
 			val, _ := cmd.Value.([]byte)
 

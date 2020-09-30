@@ -20,8 +20,11 @@ import "log"
 //
 
 // The number of shards.
-const NShards = 10
-const debug = 0
+const (
+	NShards       = 10
+	debug         = 0
+	lastConfigInd = -1
+)
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if debug > 0 {
