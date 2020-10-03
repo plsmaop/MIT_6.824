@@ -138,7 +138,7 @@ func (ck *Clerk) Get(key string) string {
 			for si := 0; si < len(servers); si++ {
 				srvInd := (curLeader + int64(si)) % int64(len(servers))
 
-				srv := ck.make_end(servers[si])
+				srv := ck.make_end(servers[srvInd])
 				var reply GetReply
 				ok := ck.send(srv, getRPCName, &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {

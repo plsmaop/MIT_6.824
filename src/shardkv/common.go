@@ -25,10 +25,10 @@ type opType string
 
 const (
 	cleanUpOp  opType = "cleanUp"
-	getType           = "get"
-	putType           = "put"
-	appendType        = "append"
-	configType        = "config"
+	getType    opType = "get"
+	putType    opType = "put"
+	appendType opType = "append"
+	configType opType = "config"
 )
 
 type Header struct {
@@ -177,7 +177,7 @@ func (ca *ConfigArgs) GetKey() string {
 }
 
 func (ca *ConfigArgs) GetValue() string {
-	return ca.Config
+	return string(ca.Config)
 }
 
 func (ca *ConfigArgs) GetOp() opType {
