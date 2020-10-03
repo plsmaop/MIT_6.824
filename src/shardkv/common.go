@@ -1,5 +1,7 @@
 package shardkv
 
+import "../shardmaster"
+
 const debug = 0
 
 const (
@@ -209,4 +211,16 @@ func (cr *ConfigReply) SetErr(e Err) {
 
 func (cr *ConfigReply) SetValue(val string) {
 
+}
+
+type ShardArgs struct {
+	Header
+	shardmaster.Config
+}
+
+type ShardReply struct {
+	Header
+	Err
+	ConfigNum int
+	Data      map[string]string
 }
