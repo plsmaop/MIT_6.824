@@ -68,6 +68,15 @@ func (kvs *KVStore) AtomicOp(k string, op func(interface{}) interface{}) bool {
 	return true
 }
 
+func (kvs *KVStore) Map(f func(interface{}, interface{}) interface{}) {
+	kvs.mu.Lock()
+	defer kvs.mu.Unlock()
+
+	for k, v := range kvs.kvTable {
+		kvs.kvTable[k] = f(k, v)
+	}
+}
+
 func (kvs *KVStore) Copy() map[string]interface{} {
 	kvs.mu.RLock()
 	defer kvs.mu.RUnlock()
@@ -96,10 +105,34 @@ type Op struct {
 	Value    []byte
 	ClientID string
 	SeqNum   int64
+	Shard    int
+	Err      Err
 }
 
-type pullWork struct {
-	servers []string
+type shardQueue struct {
+	sync.Mutex
+	queue []raft.ApplyMsg
+	shard int
+}
+
+func (sq *shardQueue) enqueue(msg raft.ApplyMsg) {
+	sq.Lock()
+	defer sq.Unlock()
+
+	sq.queue = append(sq.queue, msg)
+}
+
+func (sq *shardQueue) dequeue(msg *raft.ApplyMsg) bool {
+	sq.Lock()
+	defer sq.Unlock()
+
+	if len(sq.queue) == 0 {
+		return false
+	}
+
+	*msg = sq.queue[0]
+	sq.queue = sq.queue[1:]
+	return true
 }
 
 type ShardKV struct {
@@ -115,11 +148,11 @@ type ShardKV struct {
 	dead         int32 // set by Kill()
 
 	// for configuration
-	pullWorkerChan    chan pullWork
+	shardArgsChan     chan ShardArgs
 	config            shardmaster.Config
 	prevConfig        shardmaster.Config
-	shardsShouldPull  map[int]bool
-	shardsLock        map[int]*sync.RWMutex
+	shardsLock        [shardmaster.NShards]*sync.RWMutex
+	shardsQueue       [shardmaster.NShards]shardQueue
 	queueForNewShards sync.WaitGroup
 
 	// Your definitions here.
@@ -209,13 +242,14 @@ func (kv *ShardKV) setNewConfig(c shardmaster.Config) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
+	kv.printf("Set new config: %v", c)
 	kv.prevConfig = kv.config
 	kv.config = c
 }
 
 func (kv *ShardKV) updateShards(c shardmaster.Config) {
 	prevConfig := kv.getPrevConfig()
-	oldShards := map[int]bool{}
+	var oldShards [shardmaster.NShards]bool
 	for shard, gid := range prevConfig.Shards {
 		if gid != kv.gid {
 			continue
@@ -226,96 +260,42 @@ func (kv *ShardKV) updateShards(c shardmaster.Config) {
 
 	// gid:shard
 	gidToshardsShouldPull := map[int][]int{}
-	shardsShouldPull := map[int]bool{}
-	shardsLock := map[int]*sync.RWMutex{}
 	for shard, gid := range c.Shards {
 		if gid != kv.gid {
 			continue
 		}
 
-		if _, ok := oldShards[shard]; !ok {
-			l := &sync.RWMutex{}
-			l.Lock()
-
-			shardsLock[shard] = l
-			shardsShouldPull[shard] = true
+		if !oldShards[shard] {
+			kv.printf("Lock shard: %v", shard)
+			kv.shardsLock[shard].Lock()
 			prevOwner := prevConfig.Shards[shard]
 			gidToshardsShouldPull[prevOwner] = append(gidToshardsShouldPull[prevOwner], shard)
 		}
 	}
 
-	kv.mu.Lock()
-	kv.shardsShouldPull = shardsShouldPull
-	kv.shardsLock = shardsLock
-	kv.mu.Unlock()
-
-	for gid := range gidToshardsShouldPull {
-		kv.pullWorkerChan <- pullWork{
-			servers: kv.config.Groups[gid],
+	for gid, shardsToPull := range gidToshardsShouldPull {
+		kv.shardArgsChan <- ShardArgs{
+			Header: Header{
+				SeqNum:   int64(c.Num),
+				ClientID: fmt.Sprintf("%d:%d", kv.gid, kv.me),
+			},
+			GID:          gid,
+			Servers:      kv.config.Groups[gid],
+			Config:       c,
+			ShardsToPull: shardsToPull,
 		}
 	}
 }
 
-func (kv *ShardKV) PullShards(args *ShardArgs, reply *ShardReply) {
-	if args.Config.Num != kv.getConfig().Num {
-		reply.Err = ErrFail
-		kv.printf("config num not match: %v, config: %v", args.Config.Num, kv.getConfig())
-		return
-	}
-
-	reply.ConfigNum = args.Config.Num
-	prevConfig := kv.getPrevConfig()
-	data := map[string]string{}
-	kv.mu.RLock()
-	for k, v := range kv.store {
-		if prevConfig.Shards[key2shard(k)] == kv.gid {
-			data[k] = v
-		}
-	}
-	kv.mu.RUnlock()
-	reply.Data = data
-	reply.Err = OK
-}
-
-func (kv *ShardKV) PullShardsResponse(args *ShardArgs, reply *ShardReply) {
-	if args.Config.Num != reply.ConfigNum || kv.getConfig().Num != reply.ConfigNum {
-		kv.printf("stale config: %v, %v, %v", args, reply, kv.getConfig())
-		return
-	}
-
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-
-	shards := map[int]bool{}
-	for k, v := range reply.Data {
-		kv.store[k] = v
-		shards[key2shard(k)] = true
-	}
-
-	for shard := range shards {
-		kv.shardsLock[shard].Unlock()
-	}
-
-	kv.queueForNewShards.Done()
-}
-
-func (kv *ShardKV) doPull(work pullWork) {
-	servers := work.servers
-	config := kv.getConfig()
-	args := ShardArgs{
-		Header: Header{
-			SeqNum:   int64(config.Num),
-			ClientID: fmt.Sprintf("%d:%d", kv.gid, kv.me),
-		},
-		Config: config,
-	}
-
+func (kv *ShardKV) doPull(args ShardArgs) {
+	kv.printf("do Pull: %v", args)
 	for {
-		for _, name := range servers {
+		for _, name := range args.Servers {
 			reply := ShardReply{}
 			c := kv.make_end(name)
 			ok := kv.sendPull(c, &args, &reply)
 			if !ok || reply.Err != OK {
+				kv.printf("resend pull: ok(%v) %v", ok, args)
 				continue
 			}
 
@@ -325,9 +305,59 @@ func (kv *ShardKV) doPull(work pullWork) {
 	}
 }
 
+func (kv *ShardKV) PullShards(args *ShardArgs, reply *ShardReply) {
+	kv.printf("PullShards: %v", args)
+	if args.Config.Num != kv.getConfig().Num {
+		reply.Err = ErrFail
+		kv.printf("config num not match: %v, config: %v", args.Config.Num, kv.getConfig())
+		return
+	}
+
+	reply.ConfigNum = args.Config.Num
+	shardsToPull := map[int]bool{}
+	for _, shard := range args.ShardsToPull {
+		shardsToPull[shard] = true
+	}
+
+	data := map[string]string{}
+	kv.mu.RLock()
+	for k, v := range kv.store {
+		if shardsToPull[key2shard(k)] {
+			data[k] = v
+		}
+	}
+	kv.mu.RUnlock()
+	reply.Data = data
+	reply.Err = OK
+}
+
+func (kv *ShardKV) PullShardsResponse(args *ShardArgs, reply *ShardReply) {
+	kv.printf("PullShardsResponse: %v %v", args, reply)
+	if args.Config.Num != reply.ConfigNum || kv.getConfig().Num != reply.ConfigNum {
+		kv.printf("stale config: %v, %v, %v", args, reply, kv.getConfig())
+		return
+	}
+
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	for k, v := range reply.Data {
+		kv.store[k] = v
+	}
+
+	for _, shard := range args.ShardsToPull {
+		kv.printf("Unlock Shard: %v", shard)
+		kv.shardsLock[shard].Unlock()
+	}
+
+	kv.printf("queueForNewShards: %v", kv.queueForNewShards)
+	kv.queueForNewShards.Done()
+}
+
 func (kv *ShardKV) sendPull(target *labrpc.ClientEnd, args *ShardArgs, reply *ShardReply) bool {
 	doneChan := make(chan bool)
 	go func() {
+		kv.printf("send pull to %v", target)
 		doneChan <- target.Call("ShardKV.PullShards", args, reply)
 		close(doneChan)
 	}()
@@ -461,6 +491,7 @@ func (kv *ShardKV) startRequest(args Args, reply Reply) (raftLogInd int, success
 		Value:    []byte(args.GetValue()),
 		ClientID: cID,
 		SeqNum:   seqNum,
+		Shard:    key2shard(key),
 	})
 
 	if !ok {
@@ -500,6 +531,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 			Type:     opType,
 			ClientID: cID,
 			SeqNum:   seqNum,
+			Shard:    key2shard(args.GetKey()),
 		},
 		done: done,
 	}))
@@ -508,11 +540,11 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// reply.Time = time.Now().UnixNano()
 	if opDone.Type != opType || opDone.ClientID != cID || opDone.SeqNum != seqNum {
 		reply.SetErr(ErrFail)
-		kv.printf("%v:%v failed", cID, seqNum)
+		kv.printf("%v failed", args)
 		return
 	}
 
-	e := OK
+	e := opDone.Err
 	v := opDone.Value
 	if string(v) == noSuchKey {
 		e = ErrNoKey
@@ -552,6 +584,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			Type:     opType,
 			ClientID: cID,
 			SeqNum:   seqNum,
+			Shard:    key2shard(args.GetKey()),
 		},
 		done: done,
 	}))
@@ -560,11 +593,11 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// reply.Time = time.Now().UnixNano()
 	if opDone.Type != opType || opDone.ClientID != cID || opDone.SeqNum != seqNum {
 		reply.SetErr(ErrFail)
-		kv.printf("%v:%v failed", cID, seqNum)
+		kv.printf("%v failed", args)
 		return
 	}
 
-	reply.SetErr(OK)
+	reply.SetErr(opDone.Err)
 	kv.printf("%v:%v finished", cID, seqNum)
 }
 
@@ -607,6 +640,43 @@ func (kv *ShardKV) setConfigRequest(c shardmaster.Config) {
 	}))
 }
 
+func (kv *ShardKV) applyOp(msg raft.ApplyMsg) {
+	kv.printf("about to applyOp: %v", msg)
+	cmd, ok := msg.Command.(Op)
+	if !ok {
+		log.Printf("Invalid cmd: %v, discard\n", msg.Command)
+		return
+	}
+
+	kv.shardsLock[cmd.Shard].Lock()
+	defer kv.shardsLock[cmd.Shard].Unlock()
+
+	kv.printf("applyOp: %v", msg)
+
+	switch cmd.Type {
+	case getType:
+		kv.mu.RLock()
+		if v, ok := kv.store[cmd.Key]; !ok {
+			cmd.Value = []byte(noSuchKey)
+		} else {
+			cmd.Value = []byte(v)
+		}
+		kv.mu.RUnlock()
+	case putType:
+		kv.mu.Lock()
+		kv.store[cmd.Key] = string(cmd.Value)
+		kv.mu.Unlock()
+	case appendType:
+		kv.mu.Lock()
+		kv.store[cmd.Key] += string(cmd.Value)
+		kv.mu.Unlock()
+	}
+
+	kv.finishJob(msg, cmd, OK)
+	kv.printf("queueForNewShards: %v", kv.queueForNewShards)
+	kv.queueForNewShards.Done()
+}
+
 func (kv *ShardKV) apply(msg raft.ApplyMsg) {
 	cmd, ok := msg.Command.(Op)
 	if !ok {
@@ -624,21 +694,17 @@ func (kv *ShardKV) apply(msg raft.ApplyMsg) {
 				break
 			}
 
-			kv.mu.RLock()
-			if v, ok := kv.store[cmd.Key]; !ok {
-				cmd.Value = []byte(noSuchKey)
-			} else {
-				cmd.Value = []byte(v)
-			}
-			kv.mu.RUnlock()
-		case putType:
-			kv.mu.Lock()
-			kv.store[cmd.Key] = string(cmd.Value)
-			kv.mu.Unlock()
-		case appendType:
-			kv.mu.Lock()
-			kv.store[cmd.Key] += string(cmd.Value)
-			kv.mu.Unlock()
+			kv.queueForNewShards.Add(1)
+			kv.printf("queueForNewShards: %v", kv.queueForNewShards)
+			kv.shardsQueue[cmd.Shard].enqueue(msg)
+			return
+
+		case putType, appendType:
+			kv.queueForNewShards.Add(1)
+			kv.printf("queueForNewShards: %v", kv.queueForNewShards)
+			kv.shardsQueue[cmd.Shard].enqueue(msg)
+			return
+
 		case configType:
 			r := bytes.NewBuffer(cmd.Value)
 			d := labgob.NewDecoder(r)
@@ -649,7 +715,14 @@ func (kv *ShardKV) apply(msg raft.ApplyMsg) {
 
 			kv.queueForNewShards.Wait()
 			kv.queueForNewShards.Add(1)
+			kv.printf("queueForNewShards: %v", kv.queueForNewShards)
 			kv.setNewConfig(c)
+			if c.Num <= 1 {
+				kv.queueForNewShards.Done()
+				kv.printf("queueForNewShards: %v", kv.queueForNewShards)
+				break
+			}
+
 			kv.updateShards(c)
 
 		default:
@@ -662,6 +735,23 @@ func (kv *ShardKV) apply(msg raft.ApplyMsg) {
 	if !isInShard {
 		e = ErrWrongGroup
 	}
+
+	kv.finishJob(msg, cmd, e)
+}
+
+func (kv *ShardKV) finishJob(msg raft.ApplyMsg, cmd Op, e Err) {
+	kv.printf("finish job: %v, %v", msg, cmd)
+	if cmd.Type == configType {
+		r := bytes.NewBuffer(cmd.Value)
+		d := labgob.NewDecoder(r)
+		var config shardmaster.Config
+		if d.Decode(&config) != nil {
+			log.Fatalf("%d decode config error", kv.me)
+		}
+
+		cmd.Value = []byte(fmt.Sprintf("config{Num: %v, Shards: %v, Groups: %v}", config.Num, config.Shards, config.Groups))
+	}
+
 	kv.setClient(&client{
 		ClientID:          cmd.ClientID,
 		SeqNum:            cmd.SeqNum,
@@ -680,6 +770,7 @@ func (kv *ShardKV) apply(msg raft.ApplyMsg) {
 	jobs, _ := entry.([]job)
 	kv.printf("JOBS: %v", jobs)
 
+	cmd.Err = e
 	for _, job := range jobs {
 		if job.done == nil {
 			continue
@@ -717,8 +808,8 @@ func (kv *ShardKV) appendWrapper(s string) func(interface{}) interface{} {
 }
 
 func (kv *ShardKV) cleanUpSatleReq() {
-	appliedInd := kv.getAppliedInd()
-	for ind := int64(1); ind < appliedInd; ind++ {
+	// appliedInd := kv.getAppliedInd()
+	/* for ind := int64(1); ind < appliedInd; ind++ {
 		cmdInd := fmt.Sprintf("%v", ind)
 		entry, ok := kv.jobTable.Get(cmdInd)
 		if !ok {
@@ -731,7 +822,7 @@ func (kv *ShardKV) cleanUpSatleReq() {
 		}
 
 		kv.jobTable.Delete(cmdInd)
-	}
+	} */
 }
 
 func (kv *ShardKV) snapshot(indexInLog, cmdInd, term int) {
@@ -784,8 +875,6 @@ func (kv *ShardKV) restoreStateFromSnapshot(msg raft.ApplyMsg) {
 	kv.printf("original client table: %v", kv.clientTable)
 	kv.printf("new client table: %v", clientTable)
 	kv.installClientTable(clientTable)
-	kv.updateAppliedInd(int64(msg.CommandIndex))
-	kv.updateAppliedTerm(int64(msg.CommandTerm))
 }
 
 func (kv *ShardKV) processApplyMsg(msg raft.ApplyMsg) {
@@ -797,20 +886,21 @@ func (kv *ShardKV) processApplyMsg(msg raft.ApplyMsg) {
 		}
 
 		kv.apply(msg)
-		kv.updateAppliedInd(int64(msg.CommandIndex))
-		if int64(msg.CommandTerm) > kv.getAppliedTerm() {
-			kv.updateAppliedTerm(int64(msg.CommandTerm))
-		}
-
 		kv.snapshot(msg.IndexInLog, msg.CommandIndex, msg.CommandTerm)
 
 	case raft.SnapshotEntry:
 		kv.restoreStateFromSnapshot(msg)
 
 	case raft.TermEntry:
-		if int64(msg.CommandTerm) > kv.getAppliedTerm() {
-			kv.updateAppliedTerm(int64(msg.CommandTerm))
-		}
+		break
+	}
+
+	if int64(msg.CommandIndex) > kv.getAppliedInd() {
+		kv.updateAppliedInd(int64(msg.CommandIndex))
+	}
+
+	if int64(msg.CommandTerm) > kv.getAppliedTerm() {
+		kv.updateAppliedTerm(int64(msg.CommandTerm))
 	}
 }
 
@@ -859,26 +949,46 @@ func (kv *ShardKV) startLoop() {
 				return
 			default:
 				c := kv.sm.Query(-1)
-				kv.printf("new config: %v", c)
 				kv.setConfigRequest(c)
 			}
 		}
 
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}()
 
 	// Pull Shards
 	for i := 0; i < shardmaster.NShards; i++ {
-		go func() {
+		go func(i int) {
 			for {
 				select {
 				case <-ctx.Done():
 					return
-				case pullWork := <-kv.pullWorkerChan:
-					kv.doPull(pullWork)
+				case shardArgs := <-kv.shardArgsChan:
+					kv.doPull(shardArgs)
 				}
 			}
-		}()
+		}(i)
+	}
+
+	// apply Op
+	for i := 0; i < shardmaster.NShards; i++ {
+		go func(i int) {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					msg := raft.ApplyMsg{}
+					if ok := kv.shardsQueue[i].dequeue(&msg); ok {
+						kv.printf("Shard %v dequeue %v", i, msg)
+						kv.applyOp(msg)
+						break
+					}
+
+					time.Sleep(50 * time.Millisecond)
+				}
+			}
+		}(i)
 	}
 }
 
@@ -903,7 +1013,7 @@ func (kv *ShardKV) killed() bool {
 // for debug
 //
 func (kv *ShardKV) printf(format string, a ...interface{}) {
-	a = append([]interface{}{kv.me}, a...)
+	a = append([]interface{}{fmt.Sprintf("%v:%v", kv.gid, kv.me)}, a...)
 	DPrintf("%v: "+format, a...)
 }
 
@@ -951,7 +1061,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		applyCh:      applyCh,
 		rf:           raft.Make(servers, me, persister, applyCh),
 
-		pullWorkerChan: make(chan pullWork),
+		shardArgsChan: make(chan ShardArgs),
 		config: shardmaster.Config{
 			Groups: map[int][]string{},
 		},
@@ -969,6 +1079,14 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	// Use something like this to talk to the shardmaster:
 	// kv.mck = shardmaster.MakeClerk(kv.masters)
+	for i := 0; i < shardmaster.NShards; i++ {
+		kv.shardsLock[i] = &sync.RWMutex{}
+		kv.shardsQueue[i] = shardQueue{
+			queue: []raft.ApplyMsg{},
+			shard: i,
+		}
+	}
+
 	kv.startLoop()
 
 	return kv

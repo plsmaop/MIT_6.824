@@ -173,7 +173,7 @@ func (ca *ConfigArgs) GetHeader() Header {
 }
 
 func (ca *ConfigArgs) GetKey() string {
-	return ""
+	return configKey
 }
 
 func (ca *ConfigArgs) GetValue() string {
@@ -215,7 +215,10 @@ func (cr *ConfigReply) SetValue(val string) {
 
 type ShardArgs struct {
 	Header
+	GID int
 	shardmaster.Config
+	ShardsToPull []int
+	Servers      []string
 }
 
 type ShardReply struct {
