@@ -1,6 +1,5 @@
 package shardkv
 
-// import "../shardmaster"
 import (
 	"bytes"
 	"context"
@@ -61,6 +60,15 @@ func (kvs *KVStore) AtomicOp(k string, op func(interface{}) interface{}) bool {
 
 	kvs.kvTable[k] = op(kvs.kvTable[k])
 	return true
+}
+
+func (kvs *KVStore) ForEach(f func(interface{}, interface{})) {
+	kvs.mu.Lock()
+	defer kvs.mu.Unlock()
+
+	for k, v := range kvs.kvTable {
+		f(k, v)
+	}
 }
 
 func (kvs *KVStore) Map(f func(interface{}, interface{}) interface{}) {
@@ -690,13 +698,11 @@ func (kv *ShardKV) apply(msg raft.ApplyMsg) {
 			}
 
 			kv.queueForNewShards.Add(1)
-
 			kv.shardsQueue[cmd.Shard].enqueue(msg)
 			return
 
 		case putType, appendType:
 			kv.queueForNewShards.Add(1)
-
 			kv.shardsQueue[cmd.Shard].enqueue(msg)
 			return
 
@@ -802,8 +808,21 @@ func (kv *ShardKV) appendWrapper(s string) func(interface{}) interface{} {
 }
 
 func (kv *ShardKV) cleanUpSatleReq() {
-	// appliedInd := kv.getAppliedInd()
-	/* for ind := int64(1); ind < appliedInd; ind++ {
+	jobToDelete := []int{}
+
+	kv.jobTable.ForEach(func(_, v interface{}) {
+		job, _ := v.(job)
+		c, ok := kv.getClient(job.op.ClientID)
+		if !ok {
+			return
+		}
+
+		if job.op.ClientID == c.ClientID && job.op.SeqNum < c.SeqNum {
+			jobToDelete = append(jobToDelete, job.ind)
+		}
+	})
+
+	for _, ind := range jobToDelete {
 		cmdInd := fmt.Sprintf("%v", ind)
 		entry, ok := kv.jobTable.Get(cmdInd)
 		if !ok {
@@ -816,7 +835,7 @@ func (kv *ShardKV) cleanUpSatleReq() {
 		}
 
 		kv.jobTable.Delete(cmdInd)
-	} */
+	}
 }
 
 func (kv *ShardKV) snapshot(indexInLog, cmdInd, term int) {
@@ -945,9 +964,9 @@ func (kv *ShardKV) startLoop() {
 				c := kv.sm.Query(-1)
 				kv.setConfigRequest(c)
 			}
-		}
 
-		time.Sleep(100 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
+		}
 	}()
 
 	// Pull Shards
