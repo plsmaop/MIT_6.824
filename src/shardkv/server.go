@@ -23,11 +23,6 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-const (
-	workerNum = 10
-	noSuchKey = "NoSuchKey"
-)
-
 type KVStore struct {
 	mu      sync.RWMutex
 	kvTable map[string]interface{}
@@ -172,7 +167,7 @@ type client struct {
 	AppliedInd        int
 	AppliedTerm       int
 	LastExecutedValue string
-	Err               Err
+	LastErr           Err
 }
 
 type job struct {
@@ -253,7 +248,6 @@ func (kv *ShardKV) finishPull(shardsToPull []int) {
 		kv.shardsLock[shard].Unlock()
 	}
 
-	kv.printf("queueForNewShards: %v", kv.queueForNewShards)
 	kv.queueForNewShards.Done()
 }
 
@@ -481,15 +475,8 @@ func (kv *ShardKV) startRequest(args Args, reply Reply) (raftLogInd int, success
 			// successs request
 			// reply.SetTime(time.Now().UnixNano())
 
-			e := c.Err
-			v := c.LastExecutedValue
-			if v == noSuchKey {
-				e = ErrNoKey
-				v = ""
-			}
-
-			reply.SetErr(e)
-			reply.SetValue(v)
+			reply.SetErr(c.LastErr)
+			reply.SetValue(c.LastExecutedValue)
 
 			kv.printf("Handled req: %v, reply", args, c.LastExecutedValue)
 			return -1, false
@@ -557,10 +544,6 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 
 	e := opDone.Err
 	v := opDone.Value
-	if string(v) == noSuchKey {
-		e = ErrNoKey
-		v = []byte("")
-	}
 
 	reply.SetErr(e)
 	reply.SetValue(string(v))
@@ -664,11 +647,13 @@ func (kv *ShardKV) applyOp(msg raft.ApplyMsg) {
 
 	kv.printf("applyOp: %v", msg)
 
+	e := OK
 	switch cmd.Type {
 	case getType:
 		kv.mu.RLock()
 		if v, ok := kv.store[cmd.Key]; !ok {
-			cmd.Value = []byte(noSuchKey)
+			cmd.Value = []byte("")
+			e = ErrNoKey
 		} else {
 			cmd.Value = []byte(v)
 		}
@@ -683,8 +668,7 @@ func (kv *ShardKV) applyOp(msg raft.ApplyMsg) {
 		kv.mu.Unlock()
 	}
 
-	kv.finishJob(msg, cmd, OK)
-	kv.printf("queueForNewShards: %v", kv.queueForNewShards)
+	kv.finishJob(msg, cmd, e)
 	kv.queueForNewShards.Done()
 }
 
@@ -706,13 +690,13 @@ func (kv *ShardKV) apply(msg raft.ApplyMsg) {
 			}
 
 			kv.queueForNewShards.Add(1)
-			kv.printf("queueForNewShards: %v", kv.queueForNewShards)
+
 			kv.shardsQueue[cmd.Shard].enqueue(msg)
 			return
 
 		case putType, appendType:
 			kv.queueForNewShards.Add(1)
-			kv.printf("queueForNewShards: %v", kv.queueForNewShards)
+
 			kv.shardsQueue[cmd.Shard].enqueue(msg)
 			return
 
@@ -726,11 +710,10 @@ func (kv *ShardKV) apply(msg raft.ApplyMsg) {
 
 			kv.queueForNewShards.Wait()
 			kv.queueForNewShards.Add(1)
-			kv.printf("queueForNewShards: %v", kv.queueForNewShards)
+
 			kv.setNewConfig(c)
 			if c.Num <= 1 {
 				kv.queueForNewShards.Done()
-				kv.printf("queueForNewShards: %v", kv.queueForNewShards)
 				break
 			}
 
@@ -769,7 +752,7 @@ func (kv *ShardKV) finishJob(msg raft.ApplyMsg, cmd Op, e Err) {
 		AppliedInd:        msg.CommandIndex,
 		AppliedTerm:       msg.CommandTerm,
 		LastExecutedValue: string(cmd.Value),
-		Err:               e,
+		LastErr:           e,
 	})
 
 	cmdInd := fmt.Sprintf("%v", msg.CommandIndex)
