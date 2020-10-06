@@ -247,6 +247,16 @@ func (kv *ShardKV) setNewConfig(c shardmaster.Config) {
 	kv.config = c
 }
 
+func (kv *ShardKV) finishPull(shardsToPull []int) {
+	for _, shard := range shardsToPull {
+		kv.printf("Unlock Shard: %v", shard)
+		kv.shardsLock[shard].Unlock()
+	}
+
+	kv.printf("queueForNewShards: %v", kv.queueForNewShards)
+	kv.queueForNewShards.Done()
+}
+
 func (kv *ShardKV) updateShards(c shardmaster.Config) {
 	prevConfig := kv.getPrevConfig()
 	var oldShards [shardmaster.NShards]bool
@@ -274,13 +284,20 @@ func (kv *ShardKV) updateShards(c shardmaster.Config) {
 	}
 
 	for gid, shardsToPull := range gidToshardsShouldPull {
+		servers := kv.config.Groups[gid]
+		if len(servers) == 0 {
+			kv.finishPull(shardsToPull)
+
+			continue
+		}
+
 		kv.shardArgsChan <- ShardArgs{
 			Header: Header{
 				SeqNum:   int64(c.Num),
 				ClientID: fmt.Sprintf("%d:%d", kv.gid, kv.me),
 			},
 			GID:          gid,
-			Servers:      kv.config.Groups[gid],
+			Servers:      servers,
 			Config:       c,
 			ShardsToPull: shardsToPull,
 		}
@@ -345,13 +362,7 @@ func (kv *ShardKV) PullShardsResponse(args *ShardArgs, reply *ShardReply) {
 		kv.store[k] = v
 	}
 
-	for _, shard := range args.ShardsToPull {
-		kv.printf("Unlock Shard: %v", shard)
-		kv.shardsLock[shard].Unlock()
-	}
-
-	kv.printf("queueForNewShards: %v", kv.queueForNewShards)
-	kv.queueForNewShards.Done()
+	kv.finishPull(args.ShardsToPull)
 }
 
 func (kv *ShardKV) sendPull(target *labrpc.ClientEnd, args *ShardArgs, reply *ShardReply) bool {
