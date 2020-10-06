@@ -808,7 +808,7 @@ func (kv *ShardKV) appendWrapper(s string) func(interface{}) interface{} {
 }
 
 func (kv *ShardKV) cleanUpSatleReq() {
-	jobToDelete := []int{}
+	jobsToDelete := []job{}
 
 	kv.jobTable.ForEach(func(_, v interface{}) {
 		job, _ := v.(job)
@@ -818,12 +818,12 @@ func (kv *ShardKV) cleanUpSatleReq() {
 		}
 
 		if job.op.ClientID == c.ClientID && job.op.SeqNum < c.SeqNum {
-			jobToDelete = append(jobToDelete, job.ind)
+			jobsToDelete = append(jobsToDelete, job)
 		}
 	})
 
-	for _, ind := range jobToDelete {
-		cmdInd := fmt.Sprintf("%v", ind)
+	for _, jobToDel := range jobsToDelete {
+		cmdInd := fmt.Sprintf("%v", jobToDel.ind)
 		entry, ok := kv.jobTable.Get(cmdInd)
 		if !ok {
 			continue
@@ -831,7 +831,9 @@ func (kv *ShardKV) cleanUpSatleReq() {
 
 		jobs, _ := entry.([]job)
 		for _, job := range jobs {
-			close(job.done)
+			if job.op.ClientID == jobToDel.op.ClientID && job.op.SeqNum == jobToDel.op.SeqNum {
+				close(job.done)
+			}
 		}
 
 		kv.jobTable.Delete(cmdInd)
