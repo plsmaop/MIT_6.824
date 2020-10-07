@@ -139,6 +139,64 @@ func (sq *shardQueue) dequeue(msg *raft.ApplyMsg) bool {
 	return true
 }
 
+type appliedPair struct {
+	indInLog int
+	cmdInd   int
+	term     int
+}
+
+type appliedQueue struct {
+	mu                sync.RWMutex
+	pairToApplied     []appliedPair
+	accumulatedCmdInd int
+	lastAppliedPair   appliedPair
+}
+
+// helper function
+func sigma(n int) int {
+	if n%2 == 1 {
+		// odd
+		return ((n + 1) % 2) * n
+	}
+
+	// even
+	return (n + 1) * (n / 2)
+}
+
+func (aq *appliedQueue) apply(ap appliedPair) {
+	aq.mu.Lock()
+	defer aq.mu.Unlock()
+
+	if aq.pairToApplied == nil {
+		aq.pairToApplied = []appliedPair{}
+	}
+
+	aq.pairToApplied = append(aq.pairToApplied, ap)
+	sort.Slice(aq.pairToApplied, func(i, j int) bool {
+		return aq.pairToApplied[i].cmdInd < aq.pairToApplied[j].cmdInd
+	})
+
+	apIndShouldRemove := 0
+	for _, pair := range aq.pairToApplied {
+		if aq.accumulatedCmdInd != sigma(pair.cmdInd-1) {
+			return
+		}
+
+		aq.accumulatedCmdInd += pair.cmdInd
+		aq.lastAppliedPair = pair
+		apIndShouldRemove++
+	}
+
+	aq.pairToApplied = aq.pairToApplied[apIndShouldRemove:]
+}
+
+func (aq *appliedQueue) getLastAppliedPair() appliedPair {
+	aq.mu.RLock()
+	defer aq.mu.RUnlock()
+
+	return aq.lastAppliedPair
+}
+
 type ShardKV struct {
 	sm           *shardmaster.Clerk
 	mu           sync.RWMutex
@@ -166,10 +224,7 @@ type ShardKV struct {
 	clientTable map[string]*client
 	ctMu        sync.RWMutex
 
-	indToApplied   []int
-	accumulatedInd int
-	appliedInd     int64
-	appliedTerm    int64
+	appliedQueue appliedQueue
 }
 
 type client struct {
@@ -386,43 +441,6 @@ func (kv *ShardKV) sendPull(target *labrpc.ClientEnd, args *ShardArgs, reply *Sh
 	}
 }
 
-// helper function
-func sigma(n int) int {
-	if n%2 == 1 {
-		// odd
-		return ((n + 1) % 2) * n
-	}
-
-	// even
-	return (n + 1) * (n / 2)
-}
-
-func (kv *ShardKV) updateAppliedInd(ind int) {
-	kv.indToApplied = append(kv.indToApplied, ind)
-	sort.Ints(kv.indToApplied)
-
-	for _, ind := range kv.indToApplied {
-		if kv.accumulatedInd != sigma(ind-1) {
-			return
-		}
-
-		kv.accumulatedInd += ind
-		atomic.StoreInt64(&kv.appliedInd, int64(ind))
-	}
-}
-
-func (kv *ShardKV) getAppliedInd() int64 {
-	return atomic.LoadInt64(&kv.appliedInd)
-}
-
-func (kv *ShardKV) updateAppliedTerm(term int64) {
-	atomic.StoreInt64(&kv.appliedTerm, term)
-}
-
-func (kv *ShardKV) getAppliedTerm() int64 {
-	return atomic.LoadInt64(&kv.appliedTerm)
-}
-
 func (kv *ShardKV) setClient(c *client) {
 	kv.ctMu.Lock()
 	defer kv.ctMu.Unlock()
@@ -574,11 +592,8 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
-	e := opDone.Err
-	v := opDone.Value
-
-	reply.SetErr(e)
-	reply.SetValue(string(v))
+	reply.SetErr(opDone.Err)
+	reply.SetValue(string(opDone.Value))
 
 	kv.printf("%v:%v finished", cID, seqNum)
 }
@@ -673,41 +688,38 @@ func (kv *ShardKV) applyOp(msg raft.ApplyMsg) {
 		return
 	}
 
+	// for snapshot
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	kv.printf("applyOp: %v", msg)
 
 	e := OK
 	switch cmd.Type {
 	case getType:
-		kv.mu.RLock()
 		if v, ok := kv.store[cmd.Key]; !ok {
 			cmd.Value = []byte("")
 			e = ErrNoKey
 		} else {
 			cmd.Value = []byte(v)
 		}
-		kv.mu.RUnlock()
 	case putType:
-		kv.mu.Lock()
 		kv.store[cmd.Key] = string(cmd.Value)
-		kv.mu.Unlock()
 	case appendType:
-		kv.mu.Lock()
 		kv.store[cmd.Key] += string(cmd.Value)
-		kv.mu.Unlock()
 	}
 
 	kv.finishJob(msg, cmd, e)
 	kv.queueForNewShards.Done()
-	kv.updateAppliedInd(msg.CommandIndex)
+	kv.appliedQueue.apply(appliedPair{
+		indInLog: msg.IndexInLog,
+		cmdInd:   msg.CommandIndex,
+		term:     msg.CommandTerm,
+	})
 }
 
 func (kv *ShardKV) processOp(shard int) bool {
 	kv.shardsLock[shard].Lock()
 	defer kv.shardsLock[shard].Unlock()
-
-	// for snapshot
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 
 	msg := raft.ApplyMsg{}
 	if ok := kv.shardsQueue[shard].dequeue(&msg); ok {
@@ -879,13 +891,19 @@ func (kv *ShardKV) cleanUpSatleReq() {
 	}
 }
 
-func (kv *ShardKV) snapshot(indexInLog, cmdInd, term int) {
+func (kv *ShardKV) snapshot() {
 	if kv.maxraftstate == -1 || kv.maxraftstate > kv.rf.GetPersistentSize() {
 		return
 	}
 
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+
+	ap := kv.appliedQueue.getLastAppliedPair()
+	indexInLog := ap.indInLog
+	cmdInd := ap.cmdInd
+	term := ap.term
+
 	clientTable := kv.copyClientTable()
 	kv.printf("client table to be snapshoted: %v", clientTable)
 	kv.printf("store to be snapshoted: %v", kv.store)
@@ -906,7 +924,8 @@ func (kv *ShardKV) restoreStateFromSnapshot(msg raft.ApplyMsg) {
 
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	if snapshot == nil || len(snapshot) < 1 || int64(msg.CommandIndex) < kv.appliedInd {
+	ap := kv.appliedQueue.getLastAppliedPair()
+	if snapshot == nil || len(snapshot) < 1 || msg.CommandIndex < ap.cmdInd {
 		kv.printf("reject installsnapshot: %v", msg)
 		return
 	}
@@ -935,7 +954,7 @@ func (kv *ShardKV) processApplyMsg(msg raft.ApplyMsg) {
 	switch msg.Type {
 	case raft.StateMachineCmdEntry:
 		kv.apply(msg)
-		kv.snapshot(msg.IndexInLog, msg.CommandIndex, msg.CommandTerm)
+		kv.snapshot()
 
 	case raft.SnapshotEntry:
 		kv.restoreStateFromSnapshot(msg)
@@ -947,10 +966,6 @@ func (kv *ShardKV) processApplyMsg(msg raft.ApplyMsg) {
 
 	case raft.TermEntry:
 		kv.updateAppliedInd(msg.CommandIndex)
-
-		if int64(msg.CommandTerm) > kv.getAppliedTerm() {
-			kv.updateAppliedTerm(int64(msg.CommandTerm))
-		}
 		break
 	}
 }
@@ -1111,7 +1126,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		store:       make(map[string]string),
 		clientTable: make(map[string]*client),
 
-		indToApplied: []int{},
+		appliedQueue: appliedQueue{},
 	}
 	// Your initialization code here.
 
