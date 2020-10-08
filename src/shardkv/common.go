@@ -1,6 +1,9 @@
 package shardkv
 
-import "../shardmaster"
+import (
+	"../raft"
+	"../shardmaster"
+)
 
 const debug = 0
 
@@ -213,6 +216,12 @@ func (cr *ConfigReply) SetValue(val string) {
 
 }
 
+type SnapshotData struct {
+	Stores          [shardmaster.NShards]map[string]string
+	LastExecCmdInds [shardmaster.NShards]int
+	CmdToExec       [shardmaster.NShards][]raft.ApplyMsg
+}
+
 type ShardArgs struct {
 	Header
 	GID int
@@ -225,5 +234,5 @@ type ShardReply struct {
 	Header
 	Err
 	ConfigNum int
-	Data      map[string]string
+	Data      [shardmaster.NShards]ShardStoreData
 }
