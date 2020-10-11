@@ -303,8 +303,13 @@ func (kv *ShardKV) setNewConfig(c shardmaster.Config) {
 	defer kv.mu.Unlock()
 
 	kv.printf("Set new config: %v", c)
-	kv.prevConfig = kv.config
-	kv.config = c
+	if kv.prevConfig.Num < kv.config.Num {
+		kv.prevConfig = kv.config
+	}
+
+	if kv.config.Num < c.Num {
+		kv.config = c
+	}
 }
 
 func (kv *ShardKV) finishPull(shardsToPull []int) {
@@ -346,9 +351,11 @@ func (kv *ShardKV) updateShards(c shardmaster.Config) {
 
 	kv.printf("gidToshardsShouldPull: %v", gidToshardsShouldPull)
 	if len(gidToshardsShouldPull) == 0 {
-		kv.finishPull([]int{})
 		return
 	}
+
+	kv.queueForNewShards.Add(len(gidToshardsShouldPull))
+	kv.printf("queueForNewShards Add(config pull): %v", kv.queueForNewShards)
 
 	for gid, shardsToPull := range gidToshardsShouldPull {
 		servers := kv.prevConfig.Groups[gid]
@@ -392,7 +399,7 @@ func (kv *ShardKV) doPull(args ShardArgs) {
 
 func (kv *ShardKV) PullShards(args *ShardArgs, reply *ShardReply) {
 	kv.printf("PullShards: %v", args)
-	if args.Config.Num != kv.getConfig().Num {
+	if args.Config.Num != kv.getConfigNum() {
 		reply.Err = ErrFail
 		kv.printf("config num not match: %v, config: %v", args.Config.Num, kv.getConfig())
 		return
@@ -799,12 +806,9 @@ func (kv *ShardKV) apply(msg raft.ApplyMsg) {
 
 			kv.printf("queueForNewShards Add(wait): %v", kv.queueForNewShards)
 			kv.queueForNewShards.Wait()
-			kv.queueForNewShards.Add(1)
-			kv.printf("queueForNewShards Add(config pull): %v", kv.queueForNewShards)
 
 			kv.setNewConfig(c)
 			if c.Num <= 1 {
-				kv.queueForNewShards.Done()
 				kv.printf("queueForNewShards Done(No need to pull): %v", kv.queueForNewShards)
 				break
 			}
@@ -958,6 +962,7 @@ func (kv *ShardKV) snapshot(indexInLog, cmdInd, term int) {
 		cmdToExec := make([]raft.ApplyMsg, shardStore.queue.len())
 		shardStore.queue.copyElem(&cmdToExec)
 		snapshotData.CmdToExec[shard] = cmdToExec
+		kv.printf("cmdToExec: %v", cmdToExec)
 	}
 
 	kv.printf("snapshotData: %v", snapshotData)
@@ -1015,8 +1020,12 @@ func (kv *ShardKV) restoreStateFromSnapshot(msg raft.ApplyMsg) {
 	kv.printf("original client table: %v", kv.clientTable)
 	kv.printf("new client table: %v", clientTable)
 	kv.installClientTable(clientTable)
-	kv.prevConfig = prevConfig
-	kv.config = config
+	if prevConfig.Num > kv.prevConfig.Num {
+		kv.prevConfig = prevConfig
+	}
+	if config.Num > kv.config.Num {
+		kv.config = config
+	}
 }
 
 func (kv *ShardKV) processApplyMsg(msg raft.ApplyMsg) {
