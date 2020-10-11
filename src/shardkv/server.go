@@ -314,9 +314,11 @@ func (kv *ShardKV) finishPull(shardsToPull []int) {
 	}
 
 	kv.queueForNewShards.Done()
+	kv.printf("queueForNewShards Done(finishPull): %v", kv.queueForNewShards)
 }
 
 func (kv *ShardKV) updateShards(c shardmaster.Config) {
+	kv.printf("about to update: %v", c)
 	prevConfig := kv.getPrevConfig()
 	var oldShards [shardmaster.NShards]bool
 	for shard, gid := range prevConfig.Shards {
@@ -342,14 +344,21 @@ func (kv *ShardKV) updateShards(c shardmaster.Config) {
 		}
 	}
 
+	kv.printf("gidToshardsShouldPull: %v", gidToshardsShouldPull)
+	if len(gidToshardsShouldPull) == 0 {
+		kv.finishPull([]int{})
+		return
+	}
+
 	for gid, shardsToPull := range gidToshardsShouldPull {
-		servers := kv.config.Groups[gid]
+		servers := kv.prevConfig.Groups[gid]
 		if len(servers) == 0 {
 			kv.finishPull(shardsToPull)
 
 			continue
 		}
 
+		kv.printf("try pull %v from (%v)%v", shardsToPull, gid, servers)
 		kv.shardArgsChan <- ShardArgs{
 			Header: Header{
 				SeqNum:   int64(c.Num),
@@ -696,6 +705,8 @@ func (kv *ShardKV) setConfigRequest(c shardmaster.Config) {
 }
 
 func (kv *ShardKV) applyOp(msg raft.ApplyMsg) {
+	defer kv.queueForNewShards.Done()
+
 	cmd, ok := msg.Command.(Op)
 	if !ok {
 		log.Printf("Invalid cmd: %v, discard\n", msg.Command)
@@ -725,7 +736,7 @@ func (kv *ShardKV) applyOp(msg raft.ApplyMsg) {
 
 	kv.shardStores[cmd.Shard].LastExecCmdInd = msg.CommandIndex
 	kv.finishJob(msg, cmd, e)
-	kv.queueForNewShards.Done()
+	kv.printf("queueForNewShards Done(applyOp): %v", kv.queueForNewShards)
 }
 
 func (kv *ShardKV) processOp(shard int) bool {
@@ -768,11 +779,13 @@ func (kv *ShardKV) apply(msg raft.ApplyMsg) {
 			}
 
 			kv.queueForNewShards.Add(1)
+			kv.printf("queueForNewShards Add(get): %v", kv.queueForNewShards)
 			kv.shardStores[cmd.Shard].queue.enqueue(msg)
 			return
 
 		case putType, appendType:
 			kv.queueForNewShards.Add(1)
+			kv.printf("queueForNewShards Add(put,append): %v", kv.queueForNewShards)
 			kv.shardStores[cmd.Shard].queue.enqueue(msg)
 			return
 
@@ -784,12 +797,15 @@ func (kv *ShardKV) apply(msg raft.ApplyMsg) {
 				log.Fatalf("%d decode config error", kv.me)
 			}
 
+			kv.printf("queueForNewShards Add(wait): %v", kv.queueForNewShards)
 			kv.queueForNewShards.Wait()
 			kv.queueForNewShards.Add(1)
+			kv.printf("queueForNewShards Add(config pull): %v", kv.queueForNewShards)
 
 			kv.setNewConfig(c)
 			if c.Num <= 1 {
 				kv.queueForNewShards.Done()
+				kv.printf("queueForNewShards Done(No need to pull): %v", kv.queueForNewShards)
 				break
 			}
 
