@@ -145,7 +145,7 @@ func (ck *Clerk) Get(key string) string {
 					ck.setCurLeader(int64(si))
 					return reply.Value
 				}
-				if ok && (reply.Err == ErrWrongGroup) {
+				if ok && (reply.Err == ErrWrongGroup || reply.Err == ErrFail) {
 					args.SeqNum = int64(ck.getSeqNum())
 					curLeader = 0
 					break
@@ -192,7 +192,7 @@ func (ck *Clerk) PutAppend(key string, value string, op opType) {
 					ck.setCurLeader(int64(si))
 					return
 				}
-				if ok && reply.Err == ErrWrongGroup {
+				if ok && (reply.Err == ErrWrongGroup || reply.Err == ErrFail) {
 					args.SeqNum = int64(ck.getSeqNum())
 					curLeader = 0
 					break

@@ -5,7 +5,7 @@ import (
 	"../shardmaster"
 )
 
-const debug = 0
+const debug = 1
 
 const (
 	configClientTD = "CONFIG_CLIENTID"
@@ -217,9 +217,9 @@ func (cr *ConfigReply) SetValue(val string) {
 }
 
 type SnapshotData struct {
-	Stores          [shardmaster.NShards]map[string]string
-	LastExecCmdInds [shardmaster.NShards]int
-	CmdToExec       [shardmaster.NShards][]raft.ApplyMsg
+	Stores       [shardmaster.NShards]map[string]string
+	ClientTables [shardmaster.NShards]map[string]client
+	CmdToExec    [shardmaster.NShards][]raft.ApplyMsg
 }
 
 type ShardArgs struct {
@@ -232,7 +232,7 @@ type ShardArgs struct {
 
 type ShardReply struct {
 	Header
-	Err
-	ConfigNum int
-	Data      [shardmaster.NShards]ShardStoreData
+	Err Err
+	shardmaster.Config
+	Data [shardmaster.NShards]ShardStoreData
 }
