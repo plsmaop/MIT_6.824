@@ -5,7 +5,7 @@ import (
 	"../shardmaster"
 )
 
-const debug = 1
+const debug = 0
 
 const (
 	configClientTD = "CONFIG_CLIENTID"
@@ -42,7 +42,7 @@ type Header struct {
 
 type Args interface {
 	GetKey() string
-	GetValue() string
+	GetValue() interface{}
 	GetOp() opType
 	GetHeader() Header
 }
@@ -75,7 +75,7 @@ func (paa *PutAppendArgs) GetKey() string {
 	return paa.Key
 }
 
-func (paa *PutAppendArgs) GetValue() string {
+func (paa *PutAppendArgs) GetValue() interface{} {
 	return paa.Value
 }
 
@@ -127,7 +127,7 @@ func (ga *GetArgs) GetKey() string {
 	return ga.Key
 }
 
-func (ga *GetArgs) GetValue() string {
+func (ga *GetArgs) GetValue() interface{} {
 	return ""
 }
 
@@ -179,8 +179,8 @@ func (ca *ConfigArgs) GetKey() string {
 	return configKey
 }
 
-func (ca *ConfigArgs) GetValue() string {
-	return string(ca.Config)
+func (ca *ConfigArgs) GetValue() interface{} {
+	return ca.Config
 }
 
 func (ca *ConfigArgs) GetOp() opType {

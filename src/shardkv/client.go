@@ -55,11 +55,11 @@ type Clerk struct {
 	// You will have to modify this struct.
 	id            string
 	currentLeader int64
-	seqNumber     int64
+	seqNumbers    [shardmaster.NShards]int64
 }
 
-func (ck *Clerk) getSeqNum() int64 {
-	return atomic.AddInt64(&ck.seqNumber, 1)
+func (ck *Clerk) getSeqNum(key string) int64 {
+	return atomic.AddInt64(&ck.seqNumbers[key2shard(key)], 1)
 }
 
 func (ck *Clerk) setCurLeader(leader int64) {
@@ -89,10 +89,9 @@ func (ck *Clerk) printf(format string, a ...interface{}) {
 //
 func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.ClientEnd) *Clerk {
 	ck := &Clerk{
-		id:        fmt.Sprintf("%v", nrand()),
-		seqNumber: 0,
-		sm:        shardmaster.MakeClerk(masters),
-		make_end:  make_end,
+		id:       fmt.Sprintf("%v", nrand()),
+		sm:       shardmaster.MakeClerk(masters),
+		make_end: make_end,
 	}
 	// You'll have to add code here.
 	return ck
@@ -123,7 +122,7 @@ func (ck *Clerk) Get(key string) string {
 	args := GetArgs{
 		Header: Header{
 			ClientID: ck.id,
-			SeqNum:   int64(ck.getSeqNum()),
+			SeqNum:   ck.getSeqNum(key),
 		},
 		Key: key,
 	}
@@ -142,11 +141,10 @@ func (ck *Clerk) Get(key string) string {
 				var reply GetReply
 				ok := ck.send(srv, getRPCName, &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-					ck.setCurLeader(int64(si))
+					ck.setCurLeader(int64(srvInd))
 					return reply.Value
 				}
-				if ok && (reply.Err == ErrWrongGroup || reply.Err == ErrFail) {
-					args.SeqNum = int64(ck.getSeqNum())
+				if ok && (reply.Err == ErrWrongGroup) {
 					curLeader = 0
 					break
 				}
@@ -169,7 +167,7 @@ func (ck *Clerk) PutAppend(key string, value string, op opType) {
 	args := PutAppendArgs{
 		Header: Header{
 			ClientID: ck.id,
-			SeqNum:   int64(ck.getSeqNum()),
+			SeqNum:   ck.getSeqNum(key),
 		},
 		Key:   key,
 		Value: value,
@@ -189,11 +187,10 @@ func (ck *Clerk) PutAppend(key string, value string, op opType) {
 				var reply PutAppendReply
 				ok := ck.send(srv, putAppendRPCName, &args, &reply)
 				if ok && reply.Err == OK {
-					ck.setCurLeader(int64(si))
+					ck.setCurLeader(int64(srvInd))
 					return
 				}
-				if ok && (reply.Err == ErrWrongGroup || reply.Err == ErrFail) {
-					args.SeqNum = int64(ck.getSeqNum())
+				if ok && (reply.Err == ErrWrongGroup) {
 					curLeader = 0
 					break
 				}
