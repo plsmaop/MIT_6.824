@@ -1,6 +1,8 @@
 package shardkv
 
 import (
+	"time"
+
 	"../raft"
 	"../shardmaster"
 )
@@ -8,8 +10,10 @@ import (
 const debug = 0
 
 const (
-	configClientTD = "CONFIG_CLIENTID"
-	configKey      = "CONFIG_KEY"
+	configClientTD          = "CONFIG_CLIENTID"
+	configKey               = "CONFIG_KEY"
+	pullShardRetryThreshold = 100
+	pullShardWaitTime       = 100 * time.Millisecond
 )
 
 type Err string

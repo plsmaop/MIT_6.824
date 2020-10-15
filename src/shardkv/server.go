@@ -392,7 +392,7 @@ func (kv *ShardKV) finishPull(shardsToPull []int) {
 	}
 
 	kv.queueForNewShards.Done()
-	kv.printf("queueForNewShards Done(finishPull): %v", kv.queueForNewShards)
+	// kv.printf("queueForNewShards Done(finishPull): %v", kv.queueForNewShards)
 }
 
 //
@@ -475,7 +475,7 @@ func (kv *ShardKV) updateShards(config shardmaster.Config) {
 	}
 
 	kv.queueForNewShards.Add(len(gidToShardsShouldPull))
-	kv.printf("queueForNewShards Add(config pull): %v", kv.queueForNewShards)
+	// kv.printf("queueForNewShards Add(config pull): %v", kv.queueForNewShards)
 	kv.mu.Unlock()
 
 	for gid, shardsToPull := range gidToShardsShouldPull {
@@ -509,7 +509,7 @@ func (kv *ShardKV) doPull(args ShardArgs) {
 			ok := kv.sendPull(c, &args, &reply)
 			if !ok || reply.Err != OK {
 				kv.printf("resend pull: ok(%v) %v", ok, args)
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(pullShardWaitTime)
 				continue
 			}
 
@@ -819,7 +819,7 @@ func (kv *ShardKV) applyOp(msg raft.ApplyMsg) {
 	}
 
 	kv.finishJob(msg, cmd, e)
-	kv.printf("queueForNewShards Done(applyOp): %v", kv.queueForNewShards)
+	// kv.printf("queueForNewShards Done(applyOp): %v", kv.queueForNewShards)
 }
 
 func (kv *ShardKV) processOp(shard int) bool {
@@ -845,7 +845,7 @@ func (kv *ShardKV) applyConfig(cmd Op) {
 		log.Fatalf("%d decode config error", kv.me)
 	}
 
-	kv.printf("queueForNewShards Add(wait): %v", kv.queueForNewShards)
+	// kv.printf("queueForNewShards Add(wait): %v", kv.queueForNewShards)
 	kv.queueForNewShards.Wait()
 
 	kv.updateShards(c)
@@ -883,13 +883,13 @@ func (kv *ShardKV) apply(msg raft.ApplyMsg) {
 			}
 
 			kv.queueForNewShards.Add(1)
-			kv.printf("queueForNewShards Add(get): %v", kv.queueForNewShards)
+			// kv.printf("queueForNewShards Add(get): %v", kv.queueForNewShards)
 			kv.shardStores[cmd.Shard].queue.enqueue(msg)
 			return
 
 		case putType, appendType:
 			kv.queueForNewShards.Add(1)
-			kv.printf("queueForNewShards Add(put,append): %v", kv.queueForNewShards)
+			// kv.printf("queueForNewShards Add(put,append): %v", kv.queueForNewShards)
 			kv.shardStores[cmd.Shard].queue.enqueue(msg)
 			return
 
@@ -1117,8 +1117,10 @@ func (kv *ShardKV) restoreStateFromSnapshot(msg raft.ApplyMsg) {
 	kv.configNumToStoreSnapshot = configNumToStoreSnapshot
 
 	// update config
+	kv.mu.Lock()
 	kv.prevConfig = prevConfig
 	kv.config = config
+	kv.mu.Unlock()
 	kv.printf("finish srestore napshot")
 }
 
@@ -1188,7 +1190,25 @@ func (kv *ShardKV) startLoop() {
 		}
 	}()
 
-	// Pull Shards and Apply Op
+	// Apply Op
+	for i := 0; i < shardmaster.NShards; i++ {
+		go func(i int) {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					if kv.processOp(i) {
+						break
+					}
+
+					time.Sleep(50 * time.Millisecond)
+				}
+			}
+		}(i)
+	}
+
+	// Pull Shards
 	for i := 0; i < shardmaster.NShards; i++ {
 		go func(i int) {
 			for {
@@ -1197,12 +1217,6 @@ func (kv *ShardKV) startLoop() {
 					return
 				case shardArgs := <-kv.shardArgsChan:
 					kv.doPull(shardArgs)
-				default:
-					if kv.processOp(i) {
-						break
-					}
-
-					time.Sleep(50 * time.Millisecond)
 				}
 			}
 		}(i)
