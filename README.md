@@ -19,4 +19,4 @@
 * You should read the webpage of each lab for detailed information
 * Some labs are broken into small parts and some labs and parts of a lab have dependencies on other labs and parts.
 * You can checkout different branches to start doing these labs
-* However __PLEASE NOTE THAT THE CODE OF EACH BRANCH CAN ONLY PASS THE TEST OF IT'S BRANCH NAME AND THE PREVIOUS TEST__. For example, code of branch `lab3b` can only pass `lab3b`, `lab3a` and all `lab2` tests. Code of branch `lab3b` may contain bug for `lab4` 
+* However __PLEASE NOTE THAT THE CODE OF EACH BRANCH CAN ONLY PASS THE TEST OF IT'S BRANCH NAME AND THE PREVIOUS TESTS__. For example, code of branch `lab3b` can only pass `lab3b`, `lab3a` and all `lab2` tests. Code of branch `lab3b` may contain bug for `lab4` 
