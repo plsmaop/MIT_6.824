@@ -224,6 +224,7 @@ type SnapshotData struct {
 	Stores       [shardmaster.NShards]map[string]string
 	ClientTables [shardmaster.NShards]map[string]client
 	CmdToExec    [shardmaster.NShards][]raft.ApplyMsg
+	IsReady      [shardmaster.NShards]bool
 }
 
 type ShardArgs struct {
