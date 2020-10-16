@@ -909,11 +909,12 @@ func (kv *ShardKV) applyOp(msg raft.ApplyMsg) {
 func (kv *ShardKV) processOp(ss *ShardStore) bool {
 	ss.waitForShardReady()
 
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+
 	msg := raft.ApplyMsg{}
 	if ok := ss.dequeue(&msg); ok {
 		kv.printf("Shard %v dequeue %v", ss.Shard, msg)
-		ss.mu.Lock()
-		defer ss.mu.Unlock()
 		kv.applyOp(msg)
 		return true
 	}
@@ -1192,7 +1193,9 @@ func (kv *ShardKV) restoreStateFromSnapshot(msg raft.ApplyMsg) {
 		kv.printf("New Queue(shard: %v): %v", shard, kv.shardStores[shard].queue)
 		kv.printf("original client table: %v", oldShardStore.ClientTable)
 
+		kv.printf("original store: %v", oldShardStore.Store)
 		oldShardStore.Store = snapshotData.Stores[shard]
+		kv.printf("new store: %v", oldShardStore.Store)
 		oldShardStore.ClientTable = snapshotData.ClientTables[shard]
 		if !oldShardStore.IsReady && snapshotData.IsReady[shard] {
 			oldShardStore.IsReady = true
