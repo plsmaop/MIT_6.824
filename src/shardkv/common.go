@@ -7,7 +7,7 @@ import (
 	"../shardmaster"
 )
 
-const debug = 1
+const debug = 0
 
 const (
 	pullShardID             = "PULL_SHARDID"

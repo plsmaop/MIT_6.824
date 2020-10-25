@@ -1140,10 +1140,6 @@ func (kv *ShardKV) snapshot(indexInLog, cmdInd, term int) {
 
 	snapshotData := SnapshotData{}
 	for shard, shardStore := range kv.shardStores {
-		if config.Shards[shard] != kv.gid {
-			continue
-		}
-
 		shardStore.mu.RLock()
 
 		store := map[string]string{}
@@ -1167,8 +1163,41 @@ func (kv *ShardKV) snapshot(indexInLog, cmdInd, term int) {
 		}
 		snapshotData.ClientTables[shard] = clientTable
 
-		snapshotData.Snapshots[shard] = shardStore.StoreSnapshotForConfigs
-		snapshotData.CurConfigs[shard] = shardStore.CurConfig
+		storeSnapshotForConfigs := map[int]ShardStoreSnapshot{}
+		for configNum, shardStoreSnapshot := range shardStore.StoreSnapshotForConfigs {
+			sss := ShardStoreSnapshot{
+				ConfigNum:   shardStoreSnapshot.ConfigNum,
+				Shard:       shardStoreSnapshot.Shard,
+				ClientTable: map[string]client{},
+				Store:       map[string]string{},
+			}
+
+			for cID, client := range shardStoreSnapshot.ClientTable {
+				sss.ClientTable[cID] = client
+			}
+
+			for k, v := range shardStoreSnapshot.Store {
+				sss.Store[k] = v
+			}
+
+			storeSnapshotForConfigs[configNum] = sss
+		}
+		snapshotData.Snapshots[shard] = storeSnapshotForConfigs
+
+		curConfig := shardmaster.Config{
+			Num:    shardStore.CurConfig.Num,
+			Groups: map[int][]string{},
+		}
+		for gid, srvs := range shardStore.CurConfig.Groups {
+			copySrvs := make([]string, len(srvs))
+			copy(copySrvs, srvs)
+			curConfig.Groups[gid] = copySrvs
+		}
+		for shard, gid := range shardStore.CurConfig.Shards {
+			curConfig.Shards[shard] = gid
+		}
+
+		snapshotData.CurConfigs[shard] = curConfig
 
 		shardStore.mu.RUnlock()
 	}
@@ -1176,8 +1205,10 @@ func (kv *ShardKV) snapshot(indexInLog, cmdInd, term int) {
 	kv.printf("snapshotData: %v", snapshotData)
 
 	e.Encode(snapshotData)
+	kv.mu.RLock()
 	e.Encode(prevConfig)
 	e.Encode(config)
+	kv.mu.RUnlock()
 	data := w.Bytes()
 	kv.rf.Snapshot(data, indexInLog, cmdInd, term)
 	kv.printf("finish snapshot")
@@ -1195,10 +1226,24 @@ func (kv *ShardKV) restoreStateFromSnapshot(msg raft.ApplyMsg) {
 	var snapshotData SnapshotData
 	var prevConfig, config shardmaster.Config
 
-	kv.printf("SNAPSHOT DATA: %v", snapshotData)
-	if d.Decode(&snapshotData) != nil || d.Decode(&prevConfig) != nil || d.Decode(&config) != nil {
-		log.Fatalf("%d restore failed", kv.me)
+	e := d.Decode(&snapshotData)
+	if e != nil {
+		panic(e)
 	}
+
+	e = d.Decode(&prevConfig)
+	if e != nil {
+		panic(e)
+	}
+
+	e = d.Decode(&config)
+	if e != nil {
+		panic(e)
+	}
+
+	/* if d.Decode(&snapshotData) != nil || d.Decode(&prevConfig) != nil || d.Decode(&config) != nil {
+		log.Fatalf("%d restore failed", kv.me)
+	} */
 
 	kv.printf("install snapshot go go: %v", msg)
 	kv.printf("original store: %v", kv.shardStores)
@@ -1390,6 +1435,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	labgob.Register(ShardArgs{})
+	labgob.Register(SnapshotData{})
 
 	applyCh := make(chan raft.ApplyMsg)
 	kv := &ShardKV{
