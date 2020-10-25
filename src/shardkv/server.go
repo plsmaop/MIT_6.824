@@ -117,14 +117,21 @@ type shardQueue struct {
 	queue []raft.ApplyMsg
 }
 
-func (sq *shardQueue) enqueue(msg raft.ApplyMsg) {
+func (sq *shardQueue) pushBack(msg raft.ApplyMsg) {
 	sq.Lock()
 	defer sq.Unlock()
 
 	sq.queue = append(sq.queue, msg)
 }
 
-func (sq *shardQueue) dequeue(msg *raft.ApplyMsg) bool {
+func (sq *shardQueue) pushFront(msg raft.ApplyMsg) {
+	sq.Lock()
+	defer sq.Unlock()
+
+	sq.queue = append([]raft.ApplyMsg{msg}, sq.queue...)
+}
+
+func (sq *shardQueue) front(msg *raft.ApplyMsg) bool {
 	sq.Lock()
 	defer sq.Unlock()
 
@@ -133,8 +140,44 @@ func (sq *shardQueue) dequeue(msg *raft.ApplyMsg) bool {
 	}
 
 	*msg = sq.queue[0]
-	sq.queue = sq.queue[1:]
 	return true
+}
+
+func (sq *shardQueue) back(msg *raft.ApplyMsg) bool {
+	sq.Lock()
+	defer sq.Unlock()
+
+	if len(sq.queue) == 0 {
+		return false
+	}
+
+	lastInd := len(sq.queue) - 1
+	*msg = sq.queue[lastInd]
+	return true
+}
+
+func (sq *shardQueue) popFront() {
+	sq.Lock()
+	defer sq.Unlock()
+
+	if len(sq.queue) == 0 {
+		return
+	}
+
+	// fmt.Printf("QQQP: %v\n", sq.queue)
+	sq.queue = sq.queue[1:]
+	// fmt.Printf("QQQ: %v\n", sq.queue)
+}
+
+func (sq *shardQueue) popBack() {
+	sq.Lock()
+	defer sq.Unlock()
+
+	if len(sq.queue) == 0 {
+		return
+	}
+
+	sq.queue = sq.queue[:len(sq.queue)-1]
 }
 
 func (sq *shardQueue) copyElem(q *[]raft.ApplyMsg) {
@@ -196,11 +239,18 @@ func (sq *shardQueue) setQueue(q []raft.ApplyMsg) {
 	sq.queue = q
 }
 
-type ShardStoreData struct {
-	Store       map[string]string
+type ShardStoreSnapshot struct {
+	ConfigNum   int
 	Shard       int
 	ClientTable map[string]client
-	IsReady     bool
+	Store       map[string]string
+}
+type ShardStoreData struct {
+	Store                   map[string]string
+	StoreSnapshotForConfigs map[int]ShardStoreSnapshot
+	Shard                   int
+	CurConfig               shardmaster.Config
+	ClientTable             map[string]client
 }
 
 type ShardStore struct {
@@ -213,10 +263,10 @@ type ShardStore struct {
 func NewShardStore(shard int) *ShardStore {
 	ss := &ShardStore{
 		ShardStoreData: ShardStoreData{
-			Store:       map[string]string{},
-			Shard:       shard,
-			ClientTable: map[string]client{},
-			IsReady:     false,
+			Store:                   map[string]string{},
+			Shard:                   shard,
+			ClientTable:             map[string]client{},
+			StoreSnapshotForConfigs: map[int]ShardStoreSnapshot{},
 		},
 		queue: shardQueue{
 			queue: []raft.ApplyMsg{},
@@ -227,54 +277,33 @@ func NewShardStore(shard int) *ShardStore {
 	return ss
 }
 
-func (ss *ShardStore) waitForShardReady() {
-	ss.mu.Lock()
-	for !ss.IsReady {
-		ss.cond.Wait()
-	}
-	ss.mu.Unlock()
+func (ss *ShardStore) pushBack(msg raft.ApplyMsg) {
+	ss.queue.pushBack(msg)
 }
 
-func (ss *ShardStore) setNewStoreAndClientTable(store map[string]string, clientTable map[string]client) {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-
-	if ss.IsReady {
-		return
-	}
-
-	ss.Store = store
-	ss.ClientTable = clientTable
-
-	ss.IsReady = true
-	ss.cond.Signal()
+func (ss *ShardStore) front(msg *raft.ApplyMsg) bool {
+	return ss.queue.front(msg)
 }
 
-func (ss *ShardStore) setShardNotReady() {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-
-	ss.IsReady = false
-}
-
-func (ss *ShardStore) setShardReady() {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-
-	ss.IsReady = true
-	ss.cond.Signal()
-}
-
-func (ss *ShardStore) enqueue(msg raft.ApplyMsg) {
-	ss.queue.enqueue(msg)
-}
-
-func (ss *ShardStore) dequeue(msg *raft.ApplyMsg) bool {
-	return ss.queue.dequeue(msg)
+func (ss *ShardStore) popFront() {
+	ss.queue.popFront()
 }
 
 func (ss *ShardStore) queueLen() int {
 	return ss.queue.len()
+}
+
+//
+// must be used in critical section
+//
+func (ss *ShardStore) isInShard(key string, gid int) bool {
+	if key == configKey || key == snapshotAndPullShardKey || key == onlySnapshotKey {
+		return true
+	}
+
+	shard := key2shard(key)
+	// fmt.Println("CUR SHARDS", ss.CurConfig.Shards)
+	return ss.CurConfig.Shards[shard] == gid
 }
 
 //
@@ -357,6 +386,28 @@ func (ss *ShardStore) getClientTableWithLock() map[string]client {
 	return ss.getClientTable()
 }
 
+//
+// must be used in critical section
+//
+func (ss *ShardStore) snapshotForConfigChange(configNumToSnapshoted int) {
+	sss := ShardStoreSnapshot{
+		Store:       map[string]string{},
+		ClientTable: map[string]client{},
+		Shard:       ss.Shard,
+		ConfigNum:   configNumToSnapshoted,
+	}
+
+	for k, v := range ss.Store {
+		sss.Store[k] = v
+	}
+
+	for k, v := range ss.ClientTable {
+		sss.ClientTable[k] = v
+	}
+
+	ss.StoreSnapshotForConfigs[configNumToSnapshoted] = sss
+}
+
 type ShardKV struct {
 	sm           *shardmaster.Clerk
 	mu           sync.RWMutex
@@ -370,17 +421,13 @@ type ShardKV struct {
 	dead         int32 // set by Kill()
 
 	// for configuration
-	clientID                    string
-	shardArgsChan               chan ShardArgs
-	config                      shardmaster.Config
-	prevConfig                  shardmaster.Config
-	worksToDoBeforeChangeConfig sync.WaitGroup
+	clientID   string
+	config     shardmaster.Config
+	prevConfig shardmaster.Config
 
 	// Your definitions here.
 	shardStores [shardmaster.NShards]*ShardStore
 	jobTable    KVStore
-
-	configNumToStoreSnapshot map[int][shardmaster.NShards]ShardStoreData
 }
 
 type client struct {
@@ -457,36 +504,7 @@ func (kv *ShardKV) getPrevConfig() shardmaster.Config {
 //
 // must be used in critical section
 //
-func (kv *ShardKV) snapshotForConfigChange() {
-	var storeSnapshot [shardmaster.NShards]ShardStoreData
-	for shard := 0; shard < len(storeSnapshot); shard++ {
-		if kv.config.Shards[shard] != kv.gid {
-			continue
-		}
-
-		if storeSnapshot[shard].Store == nil {
-			storeSnapshot[shard].Store = map[string]string{}
-			storeSnapshot[shard].ClientTable = map[string]client{}
-		}
-
-		// kv.shardStores[shard].mu.RLock()
-
-		for k, v := range kv.shardStores[shard].Store {
-			storeSnapshot[shard].Store[k] = v
-		}
-
-		for k, v := range kv.shardStores[shard].ClientTable {
-			storeSnapshot[shard].ClientTable[k] = v
-		}
-
-		// kv.shardStores[shard].mu.RUnlock()
-	}
-
-	kv.configNumToStoreSnapshot[kv.config.Num] = storeSnapshot
-	kv.printf("configNumToStoreSnapshot: %v", kv.configNumToStoreSnapshot)
-}
-
-func (kv *ShardKV) getShardsToPullMap(prevConfig, config shardmaster.Config, filter map[int]bool) map[int][]int {
+func (kv *ShardKV) enqueuePullMsg(prevConfig, config shardmaster.Config) {
 	var oldShards [shardmaster.NShards]bool
 	for shard, gid := range prevConfig.Shards {
 		if gid != kv.gid {
@@ -496,46 +514,46 @@ func (kv *ShardKV) getShardsToPullMap(prevConfig, config shardmaster.Config, fil
 		oldShards[shard] = true
 	}
 
-	// gid:shard
-	gidToShardsShouldPull := map[int][]int{}
 	for shard, gid := range config.Shards {
-		if gid != kv.gid {
+		if !oldShards[shard] && gid != kv.gid {
+			// only update config
+			kv.shardStores[shard].mu.Lock()
+			// kv.shardStores[shard].CurConfig = config
+			kv.shardStores[shard].mu.Unlock()
 			continue
 		}
 
-		if !oldShards[shard] && !filter[shard] {
-			prevOwner := prevConfig.Shards[shard]
-			gidToShardsShouldPull[prevOwner] = append(gidToShardsShouldPull[prevOwner], shard)
-		}
-	}
+		kv.printf("OLD SERVERS: %v", prevConfig.Groups[prevConfig.Shards[shard]])
 
-	return gidToShardsShouldPull
-}
-
-func (kv *ShardKV) startPull(gidToShardsShouldPull map[int][]int, prevConfig, config shardmaster.Config) {
-	for gid, shardsToPull := range gidToShardsShouldPull {
-		servers := prevConfig.Groups[gid]
-		if len(servers) == 0 {
-			kv.worksToDoBeforeChangeConfig.Done()
-			continue
+		key := snapshotAndPullShardKey
+		if oldShards[shard] {
+			key = onlySnapshotKey
 		}
 
-		for _, shard := range shardsToPull {
-			kv.printf("Lock shard: %v", shard)
-			kv.shardStores[shard].setShardNotReady()
-		}
-
-		kv.printf("try pull %v from (%v)%v", shardsToPull, gid, servers)
-		kv.shardArgsChan <- ShardArgs{
-			Header: Header{
+		kv.shardStores[shard].pushBack(raft.ApplyMsg{
+			Type:         raft.StateMachineCmdEntry,
+			CommandValid: false,
+			CommandIndex: -1,
+			CommandTerm:  -1,
+			IndexInLog:   -1,
+			Command: Op{
+				Shard:    shard,
+				Type:     snapshotAndPullShardType,
+				Key:      key,
 				SeqNum:   int64(config.Num),
-				ClientID: fmt.Sprintf("%d:%d", kv.gid, kv.me),
+				ClientID: fmt.Sprintf("%v:%v", pullShardID, shard),
+				Value: ShardArgs{
+					Header: Header{
+						SeqNum:   int64(config.Num),
+						ClientID: fmt.Sprintf("%d:%d", kv.gid, kv.me),
+					},
+					GID:          prevConfig.Shards[shard],
+					Config:       config,
+					ShardsToPull: []int{shard},
+					Servers:      prevConfig.Groups[prevConfig.Shards[shard]],
+				},
 			},
-			GID:          gid,
-			Servers:      servers,
-			Config:       config,
-			ShardsToPull: shardsToPull,
-		}
+		})
 	}
 }
 
@@ -548,28 +566,23 @@ func (kv *ShardKV) updateShards(config shardmaster.Config) {
 		return
 	}
 
-	kv.snapshotForConfigChange()
 	kv.prevConfig = kv.config
 	kv.config = config
 	if config.Num <= 1 {
-		for shard := range config.Shards {
-			kv.shardStores[shard].setShardReady()
+		for _, shardStore := range kv.shardStores {
+			shardStore.mu.Lock()
+			shardStore.CurConfig = config
+			shardStore.mu.Unlock()
 		}
 
 		return
 	}
 
-	gidToShardsShouldPull := kv.getShardsToPullMap(kv.prevConfig, config, map[int]bool{})
-	kv.printf("gidToShardsShouldPull: %v", gidToShardsShouldPull)
-	kv.worksToDoBeforeChangeConfig.Add(len(gidToShardsShouldPull))
-	// kv.printf("worksToDoBeforeChangeConfig Add(config pull): %v", kv.worksToDoBeforeChangeConfig)
-
-	kv.startPull(gidToShardsShouldPull, kv.prevConfig, config)
+	kv.enqueuePullMsg(kv.prevConfig, config)
 }
 
 func (kv *ShardKV) doPull(args ShardArgs) {
 	kv.printf("do Pull: %v", args)
-	defer kv.worksToDoBeforeChangeConfig.Done()
 
 	for {
 		for _, name := range args.Servers {
@@ -582,7 +595,7 @@ func (kv *ShardKV) doPull(args ShardArgs) {
 					shardsToPull := []int{}
 					for _, shard := range args.ShardsToPull {
 						kv.shardStores[shard].mu.RLock()
-						if !kv.shardStores[shard].IsReady {
+						if kv.shardStores[shard].CurConfig.Num < args.Config.Num {
 							shardsToPull = append(shardsToPull, shard)
 						}
 
@@ -610,54 +623,60 @@ func (kv *ShardKV) doPull(args ShardArgs) {
 func (kv *ShardKV) PullShards(args *ShardArgs, reply *ShardReply) {
 	kv.printf("PullShards: %v", args)
 
-	kv.mu.RLock()
-	defer kv.mu.RUnlock()
-
-	c := kv.config
-	if args.Config.Num > c.Num {
-		reply.Err = ErrFail
-		kv.printf("config num not match: %v, config: %v", args.Config.Num, kv.config)
-		return
-	}
-
-	reply.Err = OK
-	reply.Config = args.Config
 	reply.Header = Header{
 		SeqNum:   int64(args.Config.Num),
 		ClientID: fmt.Sprintf("%d:%d", kv.gid, kv.me),
 	}
 
-	kv.printf("PULL kv.configNumToStoreSnapshot: %v", kv.configNumToStoreSnapshot)
-	kv.printf("prev config num: %v", args.Config.Num-1)
-	storeSnapshot := kv.configNumToStoreSnapshot[args.Config.Num-1]
-
+	reply.Config = args.Config
+	reply.Err = ErrFail
 	for _, shard := range args.ShardsToPull {
 		if reply.Data[shard].Store == nil {
 			reply.Data[shard].Store = map[string]string{}
 			reply.Data[shard].ClientTable = map[string]client{}
+			reply.Data[shard].StoreSnapshotForConfigs = map[int]ShardStoreSnapshot{}
 		}
 
-		for k, v := range storeSnapshot[shard].Store {
-			reply.Data[shard].Store[k] = v
+		shardStore := kv.shardStores[shard]
+
+		shardStore.mu.RLock()
+		kv.printf("CUR SNAPSHOT: %v", shardStore.StoreSnapshotForConfigs)
+
+		if snapshot, ok := shardStore.StoreSnapshotForConfigs[args.Config.Num-1]; ok {
+			kv.printf("SNAPSHOT TO BE PULLED: %v", snapshot)
+			reply.Err = OK
+
+			for k, v := range snapshot.Store {
+				reply.Data[shard].Store[k] = v
+			}
+
+			for k, v := range snapshot.ClientTable {
+				reply.Data[shard].ClientTable[k] = v
+			}
 		}
 
-		for k, v := range storeSnapshot[shard].ClientTable {
-			reply.Data[shard].ClientTable[k] = v
-		}
+		kv.shardStores[shard].mu.RUnlock()
 	}
 }
 
 func (kv *ShardKV) PullShardsResponse(args *ShardArgs, reply *ShardReply) {
 	kv.printf("PullShardsResponse: %v %v", args, reply)
-
-	configNum := kv.getConfigNum()
-	if configNum != reply.Config.Num || configNum != args.Config.Num {
-		kv.printf("stale config: %v, %v, %v", args, reply, configNum)
-		return
-	}
-
 	for _, shard := range args.ShardsToPull {
-		kv.shardStores[shard].setNewStoreAndClientTable(reply.Data[shard].Store, reply.Data[shard].ClientTable)
+		shardStore := kv.shardStores[shard]
+		shardStore.mu.Lock()
+		kv.printf("GET PULLED RESP: %v, MY CURCONFIG: %v", reply.Config, shardStore.CurConfig)
+		if reply.Config.Num > shardStore.CurConfig.Num {
+			// shard Pulled
+			kv.printf("SUCCESSFUL PULLED: %v", reply)
+			shardStore.Store = reply.Data[shard].Store
+			shardStore.ClientTable = reply.Data[shard].ClientTable
+			shardStore.CurConfig = reply.Config
+
+			shardStore.popFront()
+			kv.printf("NEW SHARDSTORE: %v", shardStore)
+		}
+
+		shardStore.mu.Unlock()
 	}
 }
 
@@ -823,14 +842,8 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *ShardKV) setConfigRequest(c shardmaster.Config) {
-	prevConfigNum := kv.getConfigNum()
-	// kv.printf("prevConfigNum: %v, config: %v", prevConfigNum, c)
-	if prevConfigNum >= c.Num {
-		return
-	}
-
 	opType := configType
-	cID := configClientTD
+	cID := configClientID
 	seqNum := int64(c.Num)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -866,8 +879,6 @@ func (kv *ShardKV) setConfigRequest(c shardmaster.Config) {
 // must be used in critical seciont
 //
 func (kv *ShardKV) applyOp(msg raft.ApplyMsg) {
-	defer kv.worksToDoBeforeChangeConfig.Done()
-
 	cmd, ok := msg.Command.(Op)
 	if !ok {
 		log.Printf("Invalid cmd: %v, discard\n", msg.Command)
@@ -875,6 +886,20 @@ func (kv *ShardKV) applyOp(msg raft.ApplyMsg) {
 	}
 
 	shardStore := kv.shardStores[cmd.Shard]
+	shardStore.mu.Lock()
+	if !shardStore.isInShard(cmd.Key, kv.gid) {
+		kv.finishJob(msg, cmd, ErrWrongGroup)
+
+		var msgToPop raft.ApplyMsg
+		ok := shardStore.front(&msgToPop)
+		if ok && msgToPop.CommandIndex == msg.CommandIndex {
+			shardStore.popFront()
+		}
+
+		shardStore.mu.Unlock()
+		return
+	}
+
 	kv.printf("applyOp: %v", msg)
 
 	e := OK
@@ -899,23 +924,35 @@ func (kv *ShardKV) applyOp(msg raft.ApplyMsg) {
 		case appendType:
 			s, _ := cmd.Value.(string)
 			shardStore.append(cmd.Key, s)
+		case snapshotAndPullShardType:
+
+			shardArgs, _ := cmd.Value.(ShardArgs)
+			shardStore.snapshotForConfigChange(shardArgs.Config.Num - 1)
+			kv.printf("THEN PULL: %v", shardStore.StoreSnapshotForConfigs)
+
+			if cmd.Key == snapshotAndPullShardKey {
+				shardStore.mu.Unlock()
+				kv.doPull(shardArgs)
+
+				shardStore.mu.Lock()
+				kv.finishJob(msg, cmd, e)
+				shardStore.mu.Unlock()
+				return
+			}
 		}
 	}
 
 	kv.finishJob(msg, cmd, e)
-	// kv.printf("worksToDoBeforeChangeConfig Done(applyOp): %v", kv.worksToDoBeforeChangeConfig)
+	shardStore.popFront()
+	shardStore.mu.Unlock()
 }
 
 func (kv *ShardKV) processOp(ss *ShardStore) bool {
-	ss.waitForShardReady()
-
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-
 	msg := raft.ApplyMsg{}
-	if ok := ss.dequeue(&msg); ok {
+	if ok := ss.front(&msg); ok {
 		kv.printf("Shard %v dequeue %v", ss.Shard, msg)
 		kv.applyOp(msg)
+		kv.printf("Shard %v finish %v, lock: %v", ss.Shard, msg, ss.mu)
 		return true
 	}
 
@@ -930,9 +967,6 @@ func (kv *ShardKV) applyConfig(cmd Op) {
 	if d.Decode(&c) != nil {
 		log.Fatalf("%d decode config error", kv.me)
 	}
-
-	// kv.printf("worksToDoBeforeChangeConfig Add(wait): %v", kv.worksToDoBeforeChangeConfig)
-	kv.worksToDoBeforeChangeConfig.Wait()
 
 	kv.updateShards(c)
 }
@@ -969,15 +1003,11 @@ func (kv *ShardKV) apply(msg raft.ApplyMsg) {
 				break
 			}
 
-			kv.worksToDoBeforeChangeConfig.Add(1)
-			// kv.printf("worksToDoBeforeChangeConfig Add(get): %v", kv.worksToDoBeforeChangeConfig)
-			kv.shardStores[cmd.Shard].enqueue(msg)
+			kv.shardStores[cmd.Shard].pushBack(msg)
 			return
 
 		case putType, appendType:
-			kv.worksToDoBeforeChangeConfig.Add(1)
-			// kv.printf("worksToDoBeforeChangeConfig Add(put,append): %v", kv.worksToDoBeforeChangeConfig)
-			kv.shardStores[cmd.Shard].enqueue(msg)
+			kv.shardStores[cmd.Shard].pushBack(msg)
 			return
 
 		default:
@@ -1136,7 +1166,9 @@ func (kv *ShardKV) snapshot(indexInLog, cmdInd, term int) {
 			clientTable[cID] = client
 		}
 		snapshotData.ClientTables[shard] = clientTable
-		snapshotData.IsReady[shard] = shardStore.IsReady
+
+		snapshotData.Snapshots[shard] = shardStore.StoreSnapshotForConfigs
+		snapshotData.CurConfigs[shard] = shardStore.CurConfig
 
 		shardStore.mu.RUnlock()
 	}
@@ -1144,7 +1176,6 @@ func (kv *ShardKV) snapshot(indexInLog, cmdInd, term int) {
 	kv.printf("snapshotData: %v", snapshotData)
 
 	e.Encode(snapshotData)
-	e.Encode(kv.configNumToStoreSnapshot)
 	e.Encode(prevConfig)
 	e.Encode(config)
 	data := w.Bytes()
@@ -1162,58 +1193,44 @@ func (kv *ShardKV) restoreStateFromSnapshot(msg raft.ApplyMsg) {
 	d := labgob.NewDecoder(r)
 
 	var snapshotData SnapshotData
-	var configNumToStoreSnapshot map[int][shardmaster.NShards]ShardStoreData
 	var prevConfig, config shardmaster.Config
 
-	if d.Decode(&snapshotData) != nil || d.Decode(&configNumToStoreSnapshot) != nil || d.Decode(&prevConfig) != nil || d.Decode(&config) != nil {
+	kv.printf("SNAPSHOT DATA: %v", snapshotData)
+	if d.Decode(&snapshotData) != nil || d.Decode(&prevConfig) != nil || d.Decode(&config) != nil {
 		log.Fatalf("%d restore failed", kv.me)
 	}
 
 	kv.printf("install snapshot go go: %v", msg)
 	kv.printf("original store: %v", kv.shardStores)
 
-	shardsNotToPull := map[int]bool{}
 	for shard, oldShardStore := range kv.shardStores {
-		if config.Shards[shard] != kv.gid {
+		oldShardStore.mu.Lock()
+		if oldShardStore.CurConfig.Num > snapshotData.CurConfigs[shard].Num {
+			oldShardStore.mu.Unlock()
 			continue
 		}
 
-		oldShardStore.mu.Lock()
 		kv.printf("snapshotData.CmdToExec[%v]: %v", shard, snapshotData.CmdToExec[shard])
-
-		// add for new cmd to be executed
-		kv.worksToDoBeforeChangeConfig.Add(len(snapshotData.CmdToExec[shard]))
-
-		// minus stale cmd
-		kv.worksToDoBeforeChangeConfig.Add(-kv.shardStores[shard].queueLen())
 
 		// set new queue for cmd to be executed
 		kv.shardStores[shard].queue.setQueue(snapshotData.CmdToExec[shard])
 
-		kv.printf("New Queue(shard: %v): %v", shard, kv.shardStores[shard].queue)
 		kv.printf("original client table: %v", oldShardStore.ClientTable)
 
 		kv.printf("original store: %v", oldShardStore.Store)
 		oldShardStore.Store = snapshotData.Stores[shard]
 		kv.printf("new store: %v", oldShardStore.Store)
 		oldShardStore.ClientTable = snapshotData.ClientTables[shard]
-		if !oldShardStore.IsReady && snapshotData.IsReady[shard] {
-			oldShardStore.IsReady = true
-			kv.shardStores[shard].cond.Signal()
-		}
-
-		if snapshotData.IsReady[shard] {
-			shardsNotToPull[shard] = true
-		}
 
 		kv.printf("new client table: %v", oldShardStore.ClientTable)
+
+		oldShardStore.CurConfig = snapshotData.CurConfigs[shard]
+		oldShardStore.StoreSnapshotForConfigs = snapshotData.Snapshots[shard]
 
 		oldShardStore.mu.Unlock()
 	}
 
 	kv.printf("new store: %v", snapshotData)
-	kv.printf("new configNumToStoreSnapshot: %v", configNumToStoreSnapshot)
-	kv.configNumToStoreSnapshot = configNumToStoreSnapshot
 
 	// update config
 	kv.mu.Lock()
@@ -1221,12 +1238,16 @@ func (kv *ShardKV) restoreStateFromSnapshot(msg raft.ApplyMsg) {
 	kv.config = config
 	kv.mu.Unlock()
 	kv.printf("finish srestore napshot")
+}
 
-	// PullShards
-	gidToShardsShouldPull := kv.getShardsToPullMap(prevConfig, config, shardsNotToPull)
-	kv.worksToDoBeforeChangeConfig.Add(len(gidToShardsShouldPull))
-	kv.printf("gidToShardsShouldPull: %v", gidToShardsShouldPull)
-	kv.startPull(gidToShardsShouldPull, kv.prevConfig, config)
+func (kv *ShardKV) trySetNewConfig() {
+	curConfigNum := kv.getConfigNum()
+	c := kv.sm.Query(curConfigNum + 1)
+	if curConfigNum >= c.Num {
+		return
+	}
+
+	kv.setConfigRequest(c)
 }
 
 func (kv *ShardKV) processApplyMsg(msg raft.ApplyMsg) {
@@ -1260,7 +1281,7 @@ func (kv *ShardKV) startLoop() {
 			case <-ctx.Done():
 				return
 			default:
-				kv.cleanUpSatleReq()
+				// kv.cleanUpSatleReq()
 			}
 
 			time.Sleep(100 * time.Millisecond)
@@ -1287,8 +1308,7 @@ func (kv *ShardKV) startLoop() {
 			case <-ctx.Done():
 				return
 			default:
-				c := kv.sm.Query(kv.getConfigNum() + 1)
-				kv.setConfigRequest(c)
+				kv.trySetNewConfig()
 			}
 
 			time.Sleep(100 * time.Millisecond)
@@ -1304,28 +1324,12 @@ func (kv *ShardKV) startLoop() {
 				case <-ctx.Done():
 					return
 				default:
-					if kv.processOp(shardStore) {
-						break
+					if !kv.processOp(shardStore) {
+						time.Sleep(50 * time.Millisecond)
 					}
-
-					time.Sleep(50 * time.Millisecond)
 				}
 			}
 		}(shard)
-	}
-
-	// Pull Shards
-	for i := 0; i < shardmaster.NShards; i++ {
-		go func(i int) {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case shardArgs := <-kv.shardArgsChan:
-					kv.doPull(shardArgs)
-				}
-			}
-		}(i)
 	}
 }
 
@@ -1398,8 +1402,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		applyCh:      applyCh,
 		rf:           raft.Make(servers, me, persister, applyCh),
 
-		clientID:      fmt.Sprintf("%d:%d", gid, me),
-		shardArgsChan: make(chan ShardArgs),
+		clientID: fmt.Sprintf("%d:%d", gid, me),
 		config: shardmaster.Config{
 			Groups: map[int][]string{},
 		},
@@ -1410,8 +1413,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		jobTable: KVStore{
 			kvTable: make(map[string]interface{}),
 		},
-
-		configNumToStoreSnapshot: map[int][shardmaster.NShards]ShardStoreData{},
 	}
 	// Your initialization code here.
 

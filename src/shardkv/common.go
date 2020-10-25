@@ -7,10 +7,13 @@ import (
 	"../shardmaster"
 )
 
-const debug = 0
+const debug = 1
 
 const (
-	configClientTD          = "CONFIG_CLIENTID"
+	pullShardID             = "PULL_SHARDID"
+	snapshotAndPullShardKey = "SNAPSHOT_AND_PULL_SHARD_KEY"
+	onlySnapshotKey         = "ONLY_SNAPSHOT_KEY"
+	configClientID          = "CONFIG_CLIENTID"
 	configKey               = "CONFIG_KEY"
 	pullShardRetryThreshold = 100
 	pullShardWaitTime       = 100 * time.Millisecond
@@ -31,11 +34,13 @@ const (
 type opType string
 
 const (
-	cleanUpOp  opType = "cleanUp"
-	getType    opType = "get"
-	putType    opType = "put"
-	appendType opType = "append"
-	configType opType = "config"
+	cleanUpOp                opType = "cleanUp"
+	getType                  opType = "get"
+	putType                  opType = "put"
+	appendType               opType = "append"
+	configType               opType = "config"
+	snapshotAndPullShardType opType = "snapshotAndPullShard"
+	finishPullType           opType = "finishPull"
 )
 
 type Header struct {
@@ -224,7 +229,8 @@ type SnapshotData struct {
 	Stores       [shardmaster.NShards]map[string]string
 	ClientTables [shardmaster.NShards]map[string]client
 	CmdToExec    [shardmaster.NShards][]raft.ApplyMsg
-	IsReady      [shardmaster.NShards]bool
+	Snapshots    [shardmaster.NShards]map[int]ShardStoreSnapshot
+	CurConfigs   [shardmaster.NShards]shardmaster.Config
 }
 
 type ShardArgs struct {
