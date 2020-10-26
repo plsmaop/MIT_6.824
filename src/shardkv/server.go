@@ -1258,7 +1258,7 @@ func (kv *ShardKV) snapshot(indexInLog, cmdInd, term int) {
 	sps := kv.getSnapshotPulledStatus()
 	kv.mu.RUnlock()
 
-	kv.GCSnapshot(sps)
+	// kv.GCSnapshot(sps)
 
 	snapshotData := SnapshotData{}
 	for shard, shardStore := range kv.shardStores {
