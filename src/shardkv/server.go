@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -238,11 +240,12 @@ func (sq *shardQueue) setQueue(q []raft.ApplyMsg) {
 }
 
 type ShardStoreSnapshot struct {
-	ConfigNum      int
-	Shard          int
-	ClientTable    map[string]client
-	Store          map[string]string
-	LastExecCmdInd int
+	ConfigNum         int
+	Shard             int
+	ClientTable       map[string]client
+	Store             map[string]string
+	SnapshotForGID    int
+	SnapshotForSrvNum int
 }
 type ShardStoreData struct {
 	Store                   map[string]string
@@ -250,7 +253,6 @@ type ShardStoreData struct {
 	Shard                   int
 	CurConfig               shardmaster.Config
 	ClientTable             map[string]client
-	LastExecCmdInd          int
 }
 
 type ShardStore struct {
@@ -389,13 +391,14 @@ func (ss *ShardStore) getClientTableWithLock() map[string]client {
 //
 // must be used in critical section
 //
-func (ss *ShardStore) snapshotForConfigChange(configNumToSnapshoted int) {
+func (ss *ShardStore) snapshotForConfigChange(newConfig shardmaster.Config) {
 	sss := ShardStoreSnapshot{
-		Store:          map[string]string{},
-		ClientTable:    map[string]client{},
-		Shard:          ss.Shard,
-		ConfigNum:      configNumToSnapshoted,
-		LastExecCmdInd: ss.LastExecCmdInd,
+		Store:             map[string]string{},
+		ClientTable:       map[string]client{},
+		Shard:             ss.Shard,
+		ConfigNum:         newConfig.Num - 1,
+		SnapshotForGID:    newConfig.Shards[ss.Shard],
+		SnapshotForSrvNum: len(newConfig.Groups[newConfig.Shards[ss.Shard]]),
 	}
 
 	for k, v := range ss.Store {
@@ -406,7 +409,12 @@ func (ss *ShardStore) snapshotForConfigChange(configNumToSnapshoted int) {
 		sss.ClientTable[k] = v
 	}
 
-	ss.StoreSnapshotForConfigs[configNumToSnapshoted] = sss
+	ss.StoreSnapshotForConfigs[newConfig.Num-1] = sss
+}
+
+type ConfigAndSnapshotPulledStatus struct {
+	shardmaster.Config
+	SnapShotPulledStatus map[int]map[int]int
 }
 
 type ShardKV struct {
@@ -429,6 +437,9 @@ type ShardKV struct {
 	// Your definitions here.
 	shardStores [shardmaster.NShards]*ShardStore
 	jobTable    KVStore
+
+	// gid : id : configNum
+	snapShotPulledStatus map[int]map[int]int
 }
 
 type client struct {
@@ -443,6 +454,81 @@ type job struct {
 	ind  int
 	op   Op
 	done chan Op
+}
+
+func (kv *ShardKV) getIDFromHeader(h Header) (int, error) {
+	return strconv.Atoi(strings.Split(h.ClientID, ":")[1])
+}
+
+//
+// must be used in critical section
+//
+func (kv *ShardKV) mergeSnapshotPulledStatus(sps map[int]map[int]int) {
+	for gid, status := range sps {
+		if status == nil {
+			continue
+		}
+
+		if _, ok := kv.snapShotPulledStatus[gid]; !ok {
+			kv.snapShotPulledStatus[gid] = make(map[int]int)
+		}
+
+		for id, configNum := range status {
+			if configNum > kv.snapShotPulledStatus[gid][id] {
+				kv.snapShotPulledStatus[gid][id] = configNum
+			}
+		}
+	}
+}
+
+//
+// must be used in critical section
+//
+func (kv *ShardKV) getSnapshotPulledStatus() map[int]map[int]int {
+	sps := map[int]map[int]int{}
+	for gid, status := range kv.snapShotPulledStatus {
+		sps[gid] = make(map[int]int)
+
+		for id, configNum := range status {
+			sps[gid][id] = configNum
+		}
+	}
+
+	return sps
+}
+
+func (kv *ShardKV) GCSnapshot(sps map[int]map[int]int) {
+	kv.printf("PULLED SHARD STATUS: %v", sps)
+
+	for _, shardStore := range kv.shardStores {
+
+		snapshotToRemove := []int{}
+		shardStore.mu.Lock()
+		for configNumOfSnapshot, snapshot := range shardStore.StoreSnapshotForConfigs {
+			gid := snapshot.SnapshotForGID
+			if _, ok := sps[gid]; !ok {
+				continue
+			}
+
+			remove := true
+			for _, configNum := range sps[gid] {
+				if configNumOfSnapshot > configNum {
+					remove = false
+					break
+				}
+			}
+
+			if len(sps[gid]) == snapshot.SnapshotForSrvNum && remove {
+				snapshotToRemove = append(snapshotToRemove, configNumOfSnapshot)
+			}
+		}
+
+		for _, configNum := range snapshotToRemove {
+			delete(shardStore.StoreSnapshotForConfigs, configNum)
+		}
+
+		shardStore.mu.Unlock()
+	}
 }
 
 func (kv *ShardKV) isInShard(key string) bool {
@@ -517,10 +603,6 @@ func (kv *ShardKV) enqueuePullMsg(prevConfig, config shardmaster.Config) {
 
 	for shard, gid := range config.Shards {
 		if !oldShards[shard] && gid != kv.gid {
-			// only update config
-			kv.shardStores[shard].mu.Lock()
-			// kv.shardStores[shard].CurConfig = config
-			kv.shardStores[shard].mu.Unlock()
 			continue
 		}
 
@@ -657,6 +739,24 @@ func (kv *ShardKV) PullShards(args *ShardArgs, reply *ShardReply) {
 
 		kv.shardStores[shard].mu.RUnlock()
 	}
+
+	kv.mu.Lock()
+
+	if reply.Err == OK {
+		ID, _ := kv.getIDFromHeader(args.Header)
+		if _, ok := kv.snapShotPulledStatus[args.GID]; !ok {
+			kv.snapShotPulledStatus[args.GID] = make(map[int]int)
+		}
+
+		if kv.snapShotPulledStatus[args.GID][ID] < args.Config.Num {
+			kv.snapShotPulledStatus[args.GID][ID] = args.Config.Num
+		}
+	}
+
+	kv.mergeSnapshotPulledStatus(args.SnapShotPulledStatus)
+	reply.SnapShotPulledStatus = kv.getSnapshotPulledStatus()
+
+	kv.mu.Unlock()
 }
 
 func (kv *ShardKV) PullShardsResponse(args *ShardArgs, reply *ShardReply) {
@@ -678,6 +778,12 @@ func (kv *ShardKV) PullShardsResponse(args *ShardArgs, reply *ShardReply) {
 
 		shardStore.mu.Unlock()
 	}
+
+	kv.mu.Lock()
+
+	kv.mergeSnapshotPulledStatus(reply.SnapShotPulledStatus)
+
+	kv.mu.Unlock()
 }
 
 func (kv *ShardKV) sendPull(target *labrpc.ClientEnd, args *ShardArgs, reply *ShardReply) bool {
@@ -848,7 +954,14 @@ func (kv *ShardKV) setConfigRequest(c shardmaster.Config) {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 
-	e.Encode(c)
+	kv.mu.RLock()
+	configAndSnapshotPulledStatus := ConfigAndSnapshotPulledStatus{
+		Config:               c,
+		SnapShotPulledStatus: kv.getSnapshotPulledStatus(),
+	}
+	kv.mu.RUnlock()
+
+	e.Encode(configAndSnapshotPulledStatus)
 	data := w.Bytes()
 
 	ind, ok := kv.startRequest(&ConfigArgs{
@@ -918,19 +1031,16 @@ func (kv *ShardKV) applyOp(msg raft.ApplyMsg) {
 			} else {
 				cmd.Value = v
 			}
-			shardStore.LastExecCmdInd = msg.CommandIndex
 		case putType:
 			s, _ := cmd.Value.(string)
 			shardStore.put(cmd.Key, s)
-			shardStore.LastExecCmdInd = msg.CommandIndex
 		case appendType:
 			s, _ := cmd.Value.(string)
 			shardStore.append(cmd.Key, s)
-			shardStore.LastExecCmdInd = msg.CommandIndex
 		case snapshotAndPullShardType:
 
 			shardArgs, _ := cmd.Value.(ShardArgs)
-			shardStore.snapshotForConfigChange(shardArgs.Config.Num - 1)
+			shardStore.snapshotForConfigChange(shardArgs.Config)
 			kv.printf("THEN PULL: %v", shardStore.StoreSnapshotForConfigs)
 
 			if cmd.Key == snapshotAndPullShardKey {
@@ -966,12 +1076,16 @@ func (kv *ShardKV) applyConfig(cmd Op) {
 	b, _ := cmd.Value.([]byte)
 	r := bytes.NewBuffer(b)
 	d := labgob.NewDecoder(r)
-	var c shardmaster.Config
-	if d.Decode(&c) != nil {
+	var configAndSnapshotPulledStatus ConfigAndSnapshotPulledStatus
+	if d.Decode(&configAndSnapshotPulledStatus) != nil {
 		log.Fatalf("%d decode config error", kv.me)
 	}
 
-	kv.updateShards(c)
+	kv.updateShards(configAndSnapshotPulledStatus.Config)
+
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.mergeSnapshotPulledStatus(configAndSnapshotPulledStatus.SnapShotPulledStatus)
 }
 
 func (kv *ShardKV) apply(msg raft.ApplyMsg) {
@@ -1136,10 +1250,15 @@ func (kv *ShardKV) snapshot(indexInLog, cmdInd, term int) {
 
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-
 	config := kv.getConfig()
 	prevConfig := kv.getPrevConfig()
 	kv.printf("config to be snapshtoed: %v", config)
+
+	kv.mu.RLock()
+	sps := kv.getSnapshotPulledStatus()
+	kv.mu.RUnlock()
+
+	kv.GCSnapshot(sps)
 
 	snapshotData := SnapshotData{}
 	for shard, shardStore := range kv.shardStores {
@@ -1169,10 +1288,12 @@ func (kv *ShardKV) snapshot(indexInLog, cmdInd, term int) {
 		storeSnapshotForConfigs := map[int]ShardStoreSnapshot{}
 		for configNum, shardStoreSnapshot := range shardStore.StoreSnapshotForConfigs {
 			sss := ShardStoreSnapshot{
-				ConfigNum:   shardStoreSnapshot.ConfigNum,
-				Shard:       shardStoreSnapshot.Shard,
-				ClientTable: map[string]client{},
-				Store:       map[string]string{},
+				ConfigNum:         shardStoreSnapshot.ConfigNum,
+				Shard:             shardStoreSnapshot.Shard,
+				ClientTable:       map[string]client{},
+				Store:             map[string]string{},
+				SnapshotForGID:    shardStoreSnapshot.SnapshotForGID,
+				SnapshotForSrvNum: shardStoreSnapshot.SnapshotForSrvNum,
 			}
 
 			for cID, client := range shardStoreSnapshot.ClientTable {
@@ -1201,7 +1322,6 @@ func (kv *ShardKV) snapshot(indexInLog, cmdInd, term int) {
 		}
 
 		snapshotData.CurConfigs[shard] = curConfig
-		snapshotData.LastExecCmdInds[shard] = shardStore.LastExecCmdInd
 
 		shardStore.mu.RUnlock()
 	}
@@ -1209,10 +1329,10 @@ func (kv *ShardKV) snapshot(indexInLog, cmdInd, term int) {
 	kv.printf("snapshotData: %v", snapshotData)
 
 	e.Encode(snapshotData)
-	kv.mu.RLock()
 	e.Encode(prevConfig)
 	e.Encode(config)
-	kv.mu.RUnlock()
+	e.Encode(sps)
+
 	data := w.Bytes()
 	kv.rf.Snapshot(data, indexInLog, cmdInd, term)
 	kv.printf("finish snapshot")
@@ -1229,7 +1349,11 @@ func (kv *ShardKV) restoreStateFromSnapshot(msg raft.ApplyMsg) {
 
 	var snapshotData SnapshotData
 	var prevConfig, config shardmaster.Config
-	if d.Decode(&snapshotData) != nil || d.Decode(&prevConfig) != nil || d.Decode(&config) != nil {
+	var sps map[int]map[int]int
+	if d.Decode(&snapshotData) != nil ||
+		d.Decode(&prevConfig) != nil ||
+		d.Decode(&config) != nil ||
+		d.Decode(&sps) != nil {
 		log.Fatalf("%d restore failed", kv.me)
 	}
 
@@ -1268,6 +1392,7 @@ func (kv *ShardKV) restoreStateFromSnapshot(msg raft.ApplyMsg) {
 	kv.mu.Lock()
 	kv.prevConfig = prevConfig
 	kv.config = config
+	kv.snapShotPulledStatus = sps
 	kv.mu.Unlock()
 	kv.printf("finish srestore napshot")
 }
@@ -1424,6 +1549,10 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	labgob.Register(Op{})
 	labgob.Register(ShardArgs{})
 	labgob.Register(SnapshotData{})
+	labgob.Register(shardmaster.Config{})
+	labgob.Register(ShardArgs{})
+	labgob.Register(ShardReply{})
+	labgob.Register(ConfigAndSnapshotPulledStatus{})
 
 	applyCh := make(chan raft.ApplyMsg)
 	kv := &ShardKV{
@@ -1447,6 +1576,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		jobTable: KVStore{
 			kvTable: make(map[string]interface{}),
 		},
+
+		snapShotPulledStatus: make(map[int]map[int]int),
 	}
 	// Your initialization code here.
 

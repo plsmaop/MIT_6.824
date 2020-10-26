@@ -40,7 +40,6 @@ const (
 	appendType               opType = "append"
 	configType               opType = "config"
 	snapshotAndPullShardType opType = "snapshotAndPullShard"
-	finishPullType           opType = "finishPull"
 )
 
 type Header struct {
@@ -226,25 +225,26 @@ func (cr *ConfigReply) SetValue(val string) {
 }
 
 type SnapshotData struct {
-	Stores          [shardmaster.NShards]map[string]string
-	ClientTables    [shardmaster.NShards]map[string]client
-	CmdToExec       [shardmaster.NShards][]raft.ApplyMsg
-	Snapshots       [shardmaster.NShards]map[int]ShardStoreSnapshot
-	CurConfigs      [shardmaster.NShards]shardmaster.Config
-	LastExecCmdInds [shardmaster.NShards]int
+	Stores       [shardmaster.NShards]map[string]string
+	ClientTables [shardmaster.NShards]map[string]client
+	CmdToExec    [shardmaster.NShards][]raft.ApplyMsg
+	Snapshots    [shardmaster.NShards]map[int]ShardStoreSnapshot
+	CurConfigs   [shardmaster.NShards]shardmaster.Config
 }
 
 type ShardArgs struct {
 	Header
 	GID int
 	shardmaster.Config
-	ShardsToPull []int
-	Servers      []string
+	ShardsToPull         []int
+	Servers              []string
+	SnapShotPulledStatus map[int]map[int]int
 }
 
 type ShardReply struct {
 	Header
 	Err Err
 	shardmaster.Config
-	Data [shardmaster.NShards]ShardStoreData
+	Data                 [shardmaster.NShards]ShardStoreData
+	SnapShotPulledStatus map[int]map[int]int
 }
