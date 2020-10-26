@@ -955,7 +955,7 @@ func (kv *ShardKV) processOp(ss *ShardStore) bool {
 	if ok := ss.front(&msg); ok {
 		kv.printf("Shard %v dequeue %v", ss.Shard, msg)
 		kv.applyOp(msg)
-		kv.printf("Shard %v finish %v, lock: %v", ss.Shard, msg, ss.mu)
+		kv.printf("Shard %v finish %v", ss.Shard, msg)
 		return true
 	}
 
@@ -1263,8 +1263,6 @@ func (kv *ShardKV) restoreStateFromSnapshot(msg raft.ApplyMsg) {
 
 		oldShardStore.mu.Unlock()
 	}
-
-	kv.printf("new store: %v", snapshotData)
 
 	// update config
 	kv.mu.Lock()
