@@ -164,9 +164,7 @@ func (sq *shardQueue) popFront() {
 		return
 	}
 
-	// fmt.Printf("QQQP: %v\n", sq.queue)
 	sq.queue = sq.queue[1:]
-	// fmt.Printf("QQQ: %v\n", sq.queue)
 }
 
 func (sq *shardQueue) popBack() {
@@ -240,10 +238,11 @@ func (sq *shardQueue) setQueue(q []raft.ApplyMsg) {
 }
 
 type ShardStoreSnapshot struct {
-	ConfigNum   int
-	Shard       int
-	ClientTable map[string]client
-	Store       map[string]string
+	ConfigNum      int
+	Shard          int
+	ClientTable    map[string]client
+	Store          map[string]string
+	LastExecCmdInd int
 }
 type ShardStoreData struct {
 	Store                   map[string]string
@@ -251,6 +250,7 @@ type ShardStoreData struct {
 	Shard                   int
 	CurConfig               shardmaster.Config
 	ClientTable             map[string]client
+	LastExecCmdInd          int
 }
 
 type ShardStore struct {
@@ -391,10 +391,11 @@ func (ss *ShardStore) getClientTableWithLock() map[string]client {
 //
 func (ss *ShardStore) snapshotForConfigChange(configNumToSnapshoted int) {
 	sss := ShardStoreSnapshot{
-		Store:       map[string]string{},
-		ClientTable: map[string]client{},
-		Shard:       ss.Shard,
-		ConfigNum:   configNumToSnapshoted,
+		Store:          map[string]string{},
+		ClientTable:    map[string]client{},
+		Shard:          ss.Shard,
+		ConfigNum:      configNumToSnapshoted,
+		LastExecCmdInd: ss.LastExecCmdInd,
 	}
 
 	for k, v := range ss.Store {
@@ -634,7 +635,6 @@ func (kv *ShardKV) PullShards(args *ShardArgs, reply *ShardReply) {
 		if reply.Data[shard].Store == nil {
 			reply.Data[shard].Store = map[string]string{}
 			reply.Data[shard].ClientTable = map[string]client{}
-			reply.Data[shard].StoreSnapshotForConfigs = map[int]ShardStoreSnapshot{}
 		}
 
 		shardStore := kv.shardStores[shard]
@@ -725,7 +725,7 @@ func (kv *ShardKV) startRequest(args Args, reply Reply) (raftLogInd int, success
 			reply.SetErr(OK)
 			reply.SetValue(c.LastExecutedValue)
 
-			kv.printf("Handled req: %v, reply", args, c.LastExecutedValue)
+			kv.printf("Handled req: %v, reply: %v", args, c.LastExecutedValue)
 			return -1, false
 		}
 	}
@@ -918,12 +918,15 @@ func (kv *ShardKV) applyOp(msg raft.ApplyMsg) {
 			} else {
 				cmd.Value = v
 			}
+			shardStore.LastExecCmdInd = msg.CommandIndex
 		case putType:
 			s, _ := cmd.Value.(string)
 			shardStore.put(cmd.Key, s)
+			shardStore.LastExecCmdInd = msg.CommandIndex
 		case appendType:
 			s, _ := cmd.Value.(string)
 			shardStore.append(cmd.Key, s)
+			shardStore.LastExecCmdInd = msg.CommandIndex
 		case snapshotAndPullShardType:
 
 			shardArgs, _ := cmd.Value.(ShardArgs)
@@ -1198,6 +1201,7 @@ func (kv *ShardKV) snapshot(indexInLog, cmdInd, term int) {
 		}
 
 		snapshotData.CurConfigs[shard] = curConfig
+		snapshotData.LastExecCmdInds[shard] = shardStore.LastExecCmdInd
 
 		shardStore.mu.RUnlock()
 	}
@@ -1225,35 +1229,20 @@ func (kv *ShardKV) restoreStateFromSnapshot(msg raft.ApplyMsg) {
 
 	var snapshotData SnapshotData
 	var prevConfig, config shardmaster.Config
-
-	e := d.Decode(&snapshotData)
-	if e != nil {
-		panic(e)
-	}
-
-	e = d.Decode(&prevConfig)
-	if e != nil {
-		panic(e)
-	}
-
-	e = d.Decode(&config)
-	if e != nil {
-		panic(e)
-	}
-
-	/* if d.Decode(&snapshotData) != nil || d.Decode(&prevConfig) != nil || d.Decode(&config) != nil {
+	if d.Decode(&snapshotData) != nil || d.Decode(&prevConfig) != nil || d.Decode(&config) != nil {
 		log.Fatalf("%d restore failed", kv.me)
-	} */
+	}
 
 	kv.printf("install snapshot go go: %v", msg)
 	kv.printf("original store: %v", kv.shardStores)
 
 	for shard, oldShardStore := range kv.shardStores {
 		oldShardStore.mu.Lock()
-		if oldShardStore.CurConfig.Num > snapshotData.CurConfigs[shard].Num {
+		/* if oldShardStore.CurConfig.Num > snapshotData.CurConfigs[shard].Num {
 			oldShardStore.mu.Unlock()
+			kv.printf("REJECT TO RESTORE: old: %v, snapshot: %v", oldShardStore, snapshotData)
 			continue
-		}
+		}*/
 
 		kv.printf("snapshotData.CmdToExec[%v]: %v", shard, snapshotData.CmdToExec[shard])
 
@@ -1326,7 +1315,7 @@ func (kv *ShardKV) startLoop() {
 			case <-ctx.Done():
 				return
 			default:
-				// kv.cleanUpSatleReq()
+				kv.cleanUpSatleReq()
 			}
 
 			time.Sleep(100 * time.Millisecond)
