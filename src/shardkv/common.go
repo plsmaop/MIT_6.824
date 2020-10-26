@@ -226,11 +226,12 @@ func (cr *ConfigReply) SetValue(val string) {
 }
 
 type SnapshotData struct {
-	Stores       [shardmaster.NShards]map[string]string
-	ClientTables [shardmaster.NShards]map[string]client
-	CmdToExec    [shardmaster.NShards][]raft.ApplyMsg
-	Snapshots    [shardmaster.NShards]map[int]ShardStoreSnapshot
-	CurConfigs   [shardmaster.NShards]shardmaster.Config
+	Stores          [shardmaster.NShards]map[string]string
+	ClientTables    [shardmaster.NShards]map[string]client
+	CmdToExec       [shardmaster.NShards][]raft.ApplyMsg
+	Snapshots       [shardmaster.NShards]map[int]ShardStoreSnapshot
+	CurConfigs      [shardmaster.NShards]shardmaster.Config
+	LastExecCmdInds [shardmaster.NShards]int
 }
 
 type ShardArgs struct {
