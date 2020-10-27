@@ -1056,14 +1056,19 @@ func (kv *ShardKV) applyOp(msg raft.ApplyMsg) {
 	}
 
 	kv.finishJob(msg, cmd, e)
-	shardStore.popFront()
+	var msgToPop raft.ApplyMsg
+	queueNotEmpty := shardStore.front(&msgToPop)
+	if queueNotEmpty && msgToPop.CommandIndex == msg.CommandIndex {
+		kv.printf("Pop Front: %v", msgToPop)
+		shardStore.popFront()
+	}
 	shardStore.mu.Unlock()
 }
 
 func (kv *ShardKV) processOp(ss *ShardStore) bool {
 	msg := raft.ApplyMsg{}
 	if ok := ss.front(&msg); ok {
-		kv.printf("Shard %v dequeue %v", ss.Shard, msg)
+		kv.printf("Shard %v front %v", ss.Shard, msg)
 		kv.applyOp(msg)
 		kv.printf("Shard %v finish %v", ss.Shard, msg)
 		return true
