@@ -1,16 +1,16 @@
 # MIT_6.824
 *My implementations of programming labs of [MIT_6.824 Distributed Systems Spring 2020](https://pdos.csail.mit.edu/6.824/)*
 
-### [Lab 1: MapReduce](https://pdos.csail.mit.edu/6.824/labs/lab-mr.html)
+### [Lab 1: MapReduce](http://nil.csail.mit.edu/6.824/2020/labs/lab-mr.html)
 * Build a simple local MapReduce cluster
 * All tests passed
-### [Lab 2: Raft](https://pdos.csail.mit.edu/6.824/labs/lab-raft.html)
+### [Lab 2: Raft](http://nil.csail.mit.edu/6.824/2020/labs/lab-raft.html)
 * Implement a simple [Raft consensus protocol](https://pdos.csail.mit.edu/6.824/papers/raft-extended.pdf)
 * All tests passed
-### [Lab 3: Fault-tolerant Key/Value Service](https://pdos.csail.mit.edu/6.824/labs/lab-kvraft.html)
+### [Lab 3: Fault-tolerant Key/Value Service](http://nil.csail.mit.edu/6.824/2020/labs/lab-kvraft.html)
 * Build a fault-tolerant kv store based on the Raft protocol you've implemented with snapshot support
 * All tests passed
-### [Lab 4: Sharded Key/Value Service](https://pdos.csail.mit.edu/6.824/labs/lab-shard.html)
+### [Lab 4: Sharded Key/Value Service](http://nil.csail.mit.edu/6.824/2020/labs/lab-shard.html)
 * Build sharded fault-tolerant kv store based on the Raft protocol you've implemented with snapshot support
 * I have passed all tests excluding `TestChallenge1Delete`
 * I will work on passing all tests later
