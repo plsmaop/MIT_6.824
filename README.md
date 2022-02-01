@@ -1,5 +1,5 @@
 # MIT_6.824
-*My implementations of programming labs of [MIT_6.824 Distributed Systems Spring 2020](http://nil.csail.mit.edu/6.824/2020/schedule.html)*
+*My implementation of programming labs of [MIT_6.824 Distributed Systems Spring 2020](http://nil.csail.mit.edu/6.824/2020/schedule.html)*
 
 ### [Lab 1: MapReduce](http://nil.csail.mit.edu/6.824/2020/labs/lab-mr.html)
 * Build a simple local MapReduce cluster
